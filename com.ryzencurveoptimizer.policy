@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+
+  <!--
+    Ryzen Curve Optimizer - Polkit Action File
+    ══════════════════════════════════════════════════════════════════
+    This is a separate action id, fully independent of the
+    m16R1-power-manager project's com.ryzenadj.gui.set-params action —
+    this applet is a standalone tool that runs apart from the main
+    project, so it needs its own policy file.
+
+    INSTALL:
+      sudo cp com.ryzencurveoptimizer.policy /usr/share/polkit-1/actions/
+      sudo cp ryzen_curve_optimizer_helper.py /usr/local/lib/ryzen-curve-optimizer/
+      sudo chown root:root /usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py
+      sudo chmod 0755 /usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py
+
+    install.sh does this automatically.
+  -->
+
+  <action id="com.ryzencurveoptimizer.set-curve">
+    <description>Apply RyzenAdj Curve Optimizer values via the Ryzen Curve Optimizer applet</description>
+    <message>System Administrator Authentication Required (Ryzen Curve Optimizer)</message>
+
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py</annotate>
+  </action>
+
+</policyconfig>
