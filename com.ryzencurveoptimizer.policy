@@ -6,23 +6,31 @@
   <!--
     Ryzen Curve Optimizer - Polkit Action File
     ══════════════════════════════════════════════════════════════════
-    This is a separate action id, fully independent of the
-    m16R1-power-manager project's com.ryzenadj.gui.set-params action —
-    this applet is a standalone tool that runs apart from the main
-    project, so it needs its own policy file.
+    A separate action id, fully independent of the m16R1-power-manager
+    project's com.ryzenadj.gui.set-params action.
 
-    INSTALL:
-      sudo cp com.ryzencurveoptimizer.policy /usr/share/polkit-1/actions/
-      sudo cp ryzen_curve_optimizer_helper.py /usr/local/lib/ryzen-curve-optimizer/
-      sudo chown root:root /usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py
-      sudo chmod 0755 /usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py
+    IMPORTANT — the exec.path below must be the EXACT path of the
+    installed helper, and the applet must invoke that path directly:
 
-    install.sh does this automatically.
+        pkexec /usr/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py
+
+    NOT `pkexec python3 .../helper.py`. polkit selects the action by
+    matching the program pkexec is asked to run against exec.path, so
+    passing the interpreter as the program makes this action unmatchable
+    and silently falls back to polkit's generic exec action.
+
+    The helper must also be root-owned and mode 0755 — pkexec refuses to
+    run a program that is writable by group or other.
+
+    install.sh handles all of this, and rewrites the path below if you
+    install with a non-default PREFIX.
   -->
 
   <action id="com.ryzencurveoptimizer.set-curve">
     <description>Apply RyzenAdj Curve Optimizer values via the Ryzen Curve Optimizer applet</description>
-    <message>System Administrator Authentication Required (Ryzen Curve Optimizer)</message>
+    <description xml:lang="tr">Ryzen Curve Optimizer uygulaması üzerinden RyzenAdj Curve Optimizer değerlerini uygula</description>
+    <message>Authentication is required to change the CPU Curve Optimizer voltage offsets</message>
+    <message xml:lang="tr">CPU Curve Optimizer voltaj offsetlerini değiştirmek için kimlik doğrulama gerekiyor</message>
 
     <defaults>
       <allow_any>no</allow_any>
@@ -30,7 +38,8 @@
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
 
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 
 </policyconfig>

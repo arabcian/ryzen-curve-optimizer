@@ -67,8 +67,8 @@ banner explains this at startup.
 
 ## Features
 
-- CCD count detected live from sysfs (via shared L3 cache slices) —
-  no hardcoded topology.
+- CCD count detected live from sysfs (by matching the level-3 cache
+  and reading its shared CPU list) — no hardcoded topology.
 - Fixed 8-slot-per-CCD grid, laid out in columns (one per CCD).
 - Per-slot Disable checkbox — a disabled slot is skipped entirely when
   applying (no `--set-coper` sent for it).
@@ -89,9 +89,16 @@ invokes a small, separate root helper script
 - never uses `shell=True` — `ryzenadj` is always invoked with an
   explicit argument list;
 - resolves the `ryzenadj` binary from a fixed candidate path list, not
-  from your `$PATH`;
-- clamps every numeric value it receives to a strict range before
-  building the `ryzenadj` argument.
+  from your `$PATH`, and refuses it unless it is owned by `root` and
+  not group/world-writable (running a user-writable binary as root
+  would be a trivial privilege escalation);
+- runs `ryzenadj` with a minimal, hard-coded environment;
+- **rejects** any value that is not an integer inside the allowed
+  range, rather than silently clamping it — a clamped value is a value
+  you did not ask for, and quietly applying it to a voltage curve is
+  worse than failing loudly;
+- validates an entire per-core batch up front, so a single bad entry
+  cannot leave your CPU with a half-applied curve.
 
 Because `pkexec` already prompts you for authentication before
 anything runs, there is no separate "are you sure?" dialog in the
@@ -101,9 +108,11 @@ action.
 ## Requirements
 
 - Linux with `polkit` installed (for `pkexec`).
-- [`ryzenadj`](https://github.com/FlyGoat/RyzenAdj) installed and on
-  `PATH` (or in one of the fixed candidate locations the helper
-  checks: `/usr/bin`, `/usr/local/bin`, `/usr/sbin`).
+- [`ryzenadj`](https://github.com/FlyGoat/RyzenAdj) installed in one of
+  the fixed candidate locations the helper checks — `/usr/bin`,
+  `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/opt/ryzenadj`.
+  Your `$PATH` is never consulted. The binary must be root-owned and
+  not group/world-writable; `install.sh` reports this for you.
 - Python 3.10+ with PySide6:
   ```bash
   pip install --user PySide6
@@ -120,28 +129,60 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-This installs:
+This installs (default `PREFIX=/usr`):
 
-| File                                  | Destination                                                    |
-|----------------------------------------|-----------------------------------------------------------------|
-| `ryzen_curve_optimizer_helper.py`      | `/usr/local/lib/ryzen-curve-optimizer/`                        |
-| `icon.png`                              | `/usr/local/share/ryzen-curve-optimizer/`                      |
-| `com.ryzencurveoptimizer.policy`        | `/usr/share/polkit-1/actions/`                                 |
+| File                                | Destination                                                    |
+|-------------------------------------|----------------------------------------------------------------|
+| `ryzen_curve_optimizer.py`          | `/usr/bin/ryzen-curve-optimizer` (0755 root:root)              |
+| `ryzen_curve_optimizer_helper.py`   | `/usr/lib/ryzen-curve-optimizer/` (0755 root:root)             |
+| `icon.png`                          | `/usr/share/ryzen-curve-optimizer/` + hicolor 128x128          |
+| `icon.svg`                          | `/usr/share/icons/hicolor/scalable/apps/`                      |
+| `ryzen-curve-optimizer.desktop`     | `/usr/share/applications/`                                     |
+| `com.ryzencurveoptimizer.policy`    | `/usr/share/polkit-1/actions/`                                 |
 
-The main GUI script (`ryzen_curve_optimizer.py`) is **not** installed
-system-wide — run it directly from wherever you keep it:
+Then run it from anywhere:
 
 ```bash
-python3 ryzen_curve_optimizer.py
+ryzen-curve-optimizer
 ```
+
+...or launch **Ryzen Curve Optimizer** from your application menu.
+
+Useful flags:
+
+```bash
+ryzen-curve-optimizer --version
+ryzen-curve-optimizer --detect    # print the detected CCD topology, no GUI
+```
+
+### Choosing a different prefix
+
+```bash
+sudo PREFIX=/usr/local ./install.sh   # install under /usr/local instead
+DESTDIR=/tmp/stage ./install.sh       # staged install, for packaging
+```
+
+`install.sh` rewrites the polkit policy's `exec.path` annotation to
+match wherever the helper actually lands. The polkit **action
+directory** itself is always `/usr/share/polkit-1/actions` regardless
+of `PREFIX`, because polkit's search path is compiled in.
+
+> **Gentoo/portage note:** `/usr` belongs to the package manager. A
+> plain `sudo ./install.sh` puts files there that portage does not
+> track. Use `PREFIX=/usr/local`, or wrap this in an ebuild with
+> `DESTDIR`, if you want `/usr` to stay clean.
 
 ## Uninstall
 
 ```bash
 chmod +x uninstall.sh
-sudo ./uninstall.sh            # removes the helper, icon, and polkit policy; keeps saved profiles
-sudo ./uninstall.sh --purge    # also deletes every user's saved profiles
+sudo ./uninstall.sh                    # removes everything; keeps saved profiles
+sudo ./uninstall.sh --purge            # also deletes every user's saved profiles
+sudo PREFIX=/usr/local ./uninstall.sh  # match a non-default install
 ```
+
+It also cleans up leftovers from the older `/usr/local`-only layout
+used by earlier versions.
 
 ## Files
 
@@ -150,8 +191,8 @@ sudo ./uninstall.sh --purge    # also deletes every user's saved profiles
   `pkexec`; installed by `install.sh`, not run directly.
 - `com.ryzencurveoptimizer.policy` — polkit policy granting the
   `pkexec` action used to run the helper.
-- `install.sh` / `uninstall.sh` — installer/uninstaller for the helper,
-  icon, and polkit policy.
+- `ryzen-curve-optimizer.desktop` — application-menu entry.
+- `install.sh` / `uninstall.sh` — installer/uninstaller.
 - `icon.png` / `icon.svg` — application icon.
 
 ## License / attribution

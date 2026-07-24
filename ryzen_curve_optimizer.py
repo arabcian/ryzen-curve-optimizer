@@ -24,55 +24,30 @@ IMPORTANT — SMU slot IDs vs. OS core IDs:
   So: this applet always shows the full, fixed 8-slot-per-CCD grid
   (the real SMU addressing space), and lets the user manually mark
   which slots don't correspond to a real core on their chip via the
-  Disable checkbox — figuring out which physical cores are actually
-  populated is left to the user (typically worked out via matching
-  core-specific load/temperature behaviour between `htop`/`corefreq`
-  and this tool while testing).
+  Disable checkbox.
 
-Features:
-  * CCD *count* is detected live from sysfs (reliable — CCD boundaries
-    are exposed via shared L3 cache slices). Falls back to a 2-CCD
-    guess if that can't be read.
-  * Each CCD is always shown as a fixed 8-slot SMU addressing grid —
-    the grid never shrinks based on how many cores the OS reports,
-    since the SMU's own addressing space doesn't shrink either.
-  * A warning banner appears when the OS-visible physical core count
-    per CCD isn't 8, explaining the SMU-vs-OS mismatch above.
-  * Manual per-slot CO offset entry, laid out as columns — one column
-    per detected CCD.
-  * Per-slot "disable" checkbox (to the right of the offset field, with
-    a tooltip) — marks a slot as not populated on this chip. A disabled
-    slot's offset field is cleared and locked, and the slot is skipped
-    entirely when applying (no --set-coper sent for it).
-  * Primary-CCD / All-CCDs mode toggle — in primary mode every other
-    CCD's column is fully hidden (not just its rows).
-  * A single all-core offset (--set-coall)
-  * Profile save/load/delete (JSON, ~/.config/ryzen-curve-optimizer/profiles/)
-  * A compact output/log terminal showing every applied command and result
-  * Root operations are delegated via pkexec to a separate root helper
-    script (ryzen_curve_optimizer_helper.py) — this GUI process never runs as root and
-    never calls ryzenadj directly itself. Since pkexec already prompts
-    for authentication before anything runs, there is no separate
-    "are you sure?" dialog — declining/cancelling the pkexec prompt IS
-    the cancel action.
-
-This applet is independent of the m16R1-power-manager project's
-root_helper.py architecture; it uses its own pkexec action and its own
-tiny helper — it does not touch the main project.
+Root operations are delegated via pkexec to a separate root helper
+script; this GUI process never runs as root and never calls ryzenadj
+directly. pkexec's own authentication prompt IS the confirmation step —
+declining it is how the user backs out.
 """
 
 from __future__ import annotations
 
+import argparse
 import glob
+import html
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont, QIcon, QIntValidator, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QPlainTextEdit, QCheckBox,
@@ -80,28 +55,50 @@ from PySide6.QtWidgets import (
     QGroupBox, QFrame,
 )
 
+APP_ID = "ryzen-curve-optimizer"
 APP_TITLE = "Ryzen Curve Optimizer"
+APP_VERSION = "1.1.0"
 
 # Fixed SMU addressing space: every consumer/mobile Zen2/3/4 part
 # addresses 8 core slots per CCD, whether or not all 8 are populated.
 SLOTS_PER_CCD = 8
 CCD_COUNT_FALLBACK = 2
 
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "ryzen-curve-optimizer"
+CONFIG_DIR = Path(
+    os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+) / APP_ID
 PROFILES_DIR = CONFIG_DIR / "profiles"
+
+_HERE = Path(__file__).resolve().parent
+
+# System prefix first, then the source tree (so the applet still runs
+# straight out of a git checkout without being installed).
 ICON_CANDIDATES = [
-    "/usr/local/share/ryzen-curve-optimizer/icon.png",
-    str(Path(__file__).resolve().parent / "icon_128.png"),
-    str(Path(__file__).resolve().parent / "icon.png"),
+    f"/usr/share/{APP_ID}/icon.png",
+    f"/usr/share/icons/hicolor/128x128/apps/{APP_ID}.png",
+    f"/usr/local/share/{APP_ID}/icon.png",
+    str(_HERE / "icon.png"),
 ]
 
+HELPER_NAME = "ryzen_curve_optimizer_helper.py"
 HELPER_CANDIDATES = [
-    "/usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py",
-    str(Path(__file__).resolve().parent / "ryzen_curve_optimizer_helper.py"),
+    f"/usr/lib/{APP_ID}/{HELPER_NAME}",
+    f"/usr/libexec/{APP_ID}/{HELPER_NAME}",
+    f"/usr/local/lib/{APP_ID}/{HELPER_NAME}",
+    str(_HERE / HELPER_NAME),
 ]
 
 COALL_MIN, COALL_MAX = -50, 20
 COPER_MIN, COPER_MAX = -50, 20
+
+# Generous: this budget has to cover the user reading and typing into
+# the polkit password prompt, not just the ryzenadj call. The old 20s
+# meant a slow typist got a bogus "timed out" error.
+PKEXEC_TIMEOUT = 300
+
+MAX_LOG_BLOCKS = 2000
+
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$")
 
 # ─────────────────────────────────────────────── Gruvbox palette ──────
 GB_BG_HARD = "#1d2021"
@@ -114,13 +111,11 @@ GB_BG4 = "#7c6f64"
 GB_FG1 = "#ebdbb2"
 GB_FG2 = "#d5c4a1"
 GB_FG3 = "#bdae93"
-GB_FG4 = "#a89984"
 GB_GREY = "#928374"
 
 GB_RED = "#fb4934"
 GB_RED_DIM = "#cc241d"
 GB_GREEN = "#b8bb26"
-GB_GREEN_DIM = "#98971a"
 GB_YELLOW = "#fabd2f"
 GB_YELLOW_DIM = "#d79921"
 GB_BLUE = "#83a598"
@@ -130,124 +125,123 @@ GB_PURPLE_DIM = "#b16286"
 GB_AQUA = "#8ec07c"
 GB_AQUA_DIM = "#689d6a"
 GB_ORANGE = "#fe8019"
-GB_ORANGE_DIM = "#d65d0e"
 
 
 # ════════════════════════════════════════════ CPU topology detection ═
+def _read_sysfs(path: str) -> str | None:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _expand_cpu_list(s: str) -> list[int]:
+    """Expands a sysfs cpu list ("0-3,8,12-15") into individual ids."""
+    cpus: list[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            try:
+                cpus.extend(range(int(lo), int(hi) + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                cpus.append(int(part))
+            except ValueError:
+                continue
+    return cpus
+
+
+def _l3_shared_list(cpu_dir: str) -> str | None:
+    """Returns the shared_cpu_list of the CPU's level-3 cache.
+
+    The old code hard-coded cache/index3, which is only the L3 on the
+    common x86 layout (L1d, L1i, L2, L3). Walking the cache indices and
+    matching on `level` works everywhere, including parts that expose an
+    L4/MALL slice or omit an index.
+    """
+    for cache_dir in sorted(glob.glob(f"{cpu_dir}/cache/index[0-9]*")):
+        if _read_sysfs(f"{cache_dir}/level") == "3":
+            return _read_sysfs(f"{cache_dir}/shared_cpu_list")
+    return None
+
+
 def detect_ccd_layout() -> dict:
     """Reads what CAN be reliably read from sysfs: the number of CCDs,
     and how many OS-visible physical cores each CCD actually has.
 
-    Returns:
-        {
-            "ccd_count": int,
-            "os_cores_per_ccd": {ccd_index: int, ...},
-        }
+    Returns {"ccd_count": int, "os_cores_per_ccd": {ccd_index: int}}.
 
-    CCD boundaries come from shared L3 cache slices
-    (/sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list), which
-    is reliable and requires no root. Physical-core counting within a
-    CCD collapses SMT sibling threads via topology/core_cpus_list.
+    CCD boundaries come from shared L3 cache slices, which is reliable
+    and requires no root. Physical-core counting within a CCD collapses
+    SMT sibling threads.
 
     This does NOT attempt to guess which of the 8 fixed SMU slots per
-    CCD those OS-visible cores correspond to — see the module
-    docstring for why that mapping cannot be auto-detected. It is only
-    used to decide (a) how many CCD columns to show and (b) whether to
-    display the SMU-vs-OS mismatch warning (shown whenever a CCD's
-    OS-visible core count isn't exactly SLOTS_PER_CCD).
-
-    Returns {"ccd_count": 0, "os_cores_per_ccd": {}} if nothing usable
-    could be read — callers should fall back to a fixed guess in that
-    case.
+    CCD those OS-visible cores correspond to — see the module docstring
+    for why that mapping cannot be auto-detected. Returns zeroes if
+    nothing usable could be read; callers fall back to a fixed guess.
     """
-    try:
-        cpu_dirs = sorted(
-            glob.glob("/sys/devices/system/cpu/cpu[0-9]*"),
-            key=lambda p: int(p.rsplit("cpu", 1)[1]),
-        )
-    except (OSError, ValueError):
-        return {"ccd_count": 0, "os_cores_per_ccd": {}}
+    empty = {"ccd_count": 0, "os_cores_per_ccd": {}}
+
+    cpu_dirs = glob.glob("/sys/devices/system/cpu/cpu[0-9]*")
     if not cpu_dirs:
-        return {"ccd_count": 0, "os_cores_per_ccd": {}}
-
-    def _read(path: str) -> str | None:
-        try:
-            with open(path) as f:
-                return f.read().strip()
-        except OSError:
-            return None
-
-    def _expand_list(s: str) -> list[int]:
-        cpus = []
-        for part in s.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "-" in part:
-                try:
-                    lo, hi = part.split("-", 1)
-                    cpus.extend(range(int(lo), int(hi) + 1))
-                except ValueError:
-                    continue
-            else:
-                try:
-                    cpus.append(int(part))
-                except ValueError:
-                    continue
-        return cpus
+        return empty
 
     # Group logical CPUs by shared L3 slice (= CCD boundary).
-    l3_groups: dict[str, list[int]] = {}
+    l3_keys: set[str] = set()
     for cpu_dir in cpu_dirs:
-        shared = _read(f"{cpu_dir}/cache/index3/shared_cpu_list")
-        if shared is None:
-            continue
-        l3_groups.setdefault(shared, [])
+        shared = _l3_shared_list(cpu_dir)
+        if shared:
+            l3_keys.add(shared)
 
-    if not l3_groups:
-        return {"ccd_count": 0, "os_cores_per_ccd": {}}
+    if not l3_keys:
+        return empty
 
-    for shared_key in l3_groups:
-        l3_groups[shared_key] = sorted(set(_expand_list(shared_key)))
-
-    def _first(cpus: list[int]) -> int:
-        return cpus[0] if cpus else 1 << 30
-
-    ordered_ccds = sorted(l3_groups.values(), key=_first)
+    groups = [sorted(set(_expand_cpu_list(key))) for key in l3_keys]
+    groups = [g for g in groups if g]
+    if not groups:
+        return empty
+    groups.sort(key=lambda cpus: cpus[0])
 
     os_cores_per_ccd: dict[int, int] = {}
-    for ccd_idx, ccd_cpus in enumerate(ordered_ccds):
-        # Collapse SMT siblings to one physical core each.
+    for ccd_idx, ccd_cpus in enumerate(groups):
         seen_phys: set[str] = set()
         for cpu in ccd_cpus:
-            sib = _read(f"/sys/devices/system/cpu/cpu{cpu}/topology/core_cpus_list")
-            if sib is None:
-                sib = _read(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
-            seen_phys.add(sib if sib else str(cpu))
+            sib = (
+                _read_sysfs(f"/sys/devices/system/cpu/cpu{cpu}/topology/core_cpus_list")
+                or _read_sysfs(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
+                or str(cpu)
+            )
+            seen_phys.add(sib)
         os_cores_per_ccd[ccd_idx] = len(seen_phys)
 
-    return {"ccd_count": len(ordered_ccds), "os_cores_per_ccd": os_cores_per_ccd}
+    return {"ccd_count": len(groups), "os_cores_per_ccd": os_cores_per_ccd}
+
+
+def _find_first_file(candidates) -> str | None:
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    return None
 
 
 def _find_helper() -> str | None:
-    for cand in HELPER_CANDIDATES:
-        if os.path.isfile(cand):
-            return cand
-    return None
+    return _find_first_file(HELPER_CANDIDATES)
 
 
 def _find_icon() -> str | None:
-    for cand in ICON_CANDIDATES:
-        if os.path.isfile(cand):
-            return cand
-    return None
+    return _find_first_file(ICON_CANDIDATES)
 
 
 def _find_pkexec() -> str | None:
     for cand in ("/usr/bin/pkexec", "/usr/local/bin/pkexec"):
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        if os.access(cand, os.X_OK):
             return cand
-    import shutil
     return shutil.which("pkexec")
 
 
@@ -256,8 +250,7 @@ class HelperWorker(QThread):
     UI never blocks. Emits finished_ok(result_dict) or finished_err(str).
 
     No separate confirmation dialog precedes this — pkexec's own
-    authentication prompt is the confirmation step; declining/cancelling
-    it is how the user backs out."""
+    authentication prompt is the confirmation step."""
 
     finished_ok = Signal(dict)
     finished_err = Signal(str)
@@ -267,6 +260,35 @@ class HelperWorker(QThread):
         self.op = op
         self.params = params
 
+    def _build_argv(self, pkexec: str, helper: str) -> tuple[list[str], str | None]:
+        """Builds the pkexec command line.
+
+        This is the fix for the single most important bug in the old
+        version. polkit picks the action to enforce by matching the
+        program pkexec is asked to execute against each action's
+        org.freedesktop.policykit.exec.path annotation. The old code ran
+
+            pkexec <sys.executable> <helper>
+
+        so the program was /usr/bin/python3, which matches NO action —
+        meaning com.ryzencurveoptimizer.set-curve was never selected,
+        the custom prompt text never appeared, and auth_admin_keep
+        (password caching) never applied. Executing the helper directly
+        lets its shebang start the interpreter and makes the annotation
+        match.
+
+        If the helper is not executable (running from a git checkout
+        that has not been installed), fall back to the interpreter form
+        and warn — it still works, just under polkit's generic action.
+        """
+        if os.access(helper, os.X_OK):
+            return [pkexec, helper], None
+        return (
+            [pkexec, sys.executable, helper],
+            f"{helper} is not executable — falling back to the generic polkit "
+            "action. Run install.sh so the dedicated policy applies.",
+        )
+
     def run(self):
         pkexec = _find_pkexec()
         if not pkexec:
@@ -275,36 +297,39 @@ class HelperWorker(QThread):
         helper = _find_helper()
         if not helper:
             self.finished_err.emit(
-                "ryzen_curve_optimizer_helper.py not found.\n"
-                "Expected at: /usr/local/lib/ryzen-curve-optimizer/ryzen_curve_optimizer_helper.py\n"
-                "(or next to this script)."
+                f"{HELPER_NAME} not found.\n"
+                f"Expected at: /usr/lib/{APP_ID}/{HELPER_NAME}\n"
+                "(or next to this script). Run install.sh."
             )
             return
 
+        argv, warning = self._build_argv(pkexec, helper)
         payload = json.dumps({"op": self.op, "params": self.params})
 
         try:
             proc = subprocess.run(
-                [pkexec, sys.executable, helper],
+                argv,
                 input=payload,
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=PKEXEC_TIMEOUT,
+                check=False,
             )
         except subprocess.TimeoutExpired:
-            self.finished_err.emit("Operation timed out (pkexec/helper did not respond within 20s).")
+            self.finished_err.emit(
+                f"Operation timed out (no response within {PKEXEC_TIMEOUT}s)."
+            )
             return
-        except Exception as e:  # noqa: BLE001
+        except OSError as e:
             self.finished_err.emit(f"Failed to run pkexec: {e}")
             return
 
-        if proc.returncode in (126, 127):
-            # 126: user dismissed/declined the polkit prompt — i.e. cancel
-            # 127: pkexec/command not found
-            self.finished_err.emit(
-                "Cancelled." if proc.returncode == 126
-                else f"pkexec/command not found (exit {proc.returncode})."
-            )
+        if proc.returncode == 126:
+            # The polkit prompt was dismissed or authentication failed.
+            self.finished_err.emit("Cancelled (authentication dismissed or failed).")
+            return
+        if proc.returncode == 127:
+            self.finished_err.emit("pkexec could not find or start the helper (exit 127).")
             return
 
         out = (proc.stdout or "").strip()
@@ -321,6 +346,12 @@ class HelperWorker(QThread):
             self.finished_err.emit(f"Helper returned invalid output: {out[:500]}")
             return
 
+        if not isinstance(result, dict):
+            self.finished_err.emit("Helper returned a non-object JSON response.")
+            return
+
+        if warning:
+            result["_warning"] = warning
         self.finished_ok.emit(result)
 
 
@@ -347,14 +378,18 @@ class CoreRow(QWidget):
 
         lbl_id = QLabel(f"S{slot}")
         lbl_id.setFixedWidth(24)
-        lbl_id.setToolTip(f"Fixed SMU slot {slot} of CCD{ccd} (hardware addressing, not the OS core id)")
+        lbl_id.setToolTip(
+            f"Fixed SMU slot {slot} of CCD{ccd} (hardware addressing, not the OS core id)"
+        )
         lbl_id.setStyleSheet(f"color:{accent}; font-weight:600;")
 
         self.entry = QLineEdit()
         self.entry.setPlaceholderText("0")
-        self.entry.setFixedWidth(40)
+        self.entry.setFixedWidth(44)
         self.entry.setFixedHeight(22)
         self.entry.setAlignment(Qt.AlignCenter)
+        self.entry.setValidator(QIntValidator(COPER_MIN, COPER_MAX, self.entry))
+        self.entry.setToolTip(f"Curve Optimizer offset for this slot ({COPER_MIN}..{COPER_MAX})")
 
         self.disable_cb = QCheckBox()
         self.disable_cb.setToolTip(DISABLE_TOOLTIP)
@@ -366,6 +401,10 @@ class CoreRow(QWidget):
         lay.addWidget(self.disable_cb)
         lay.addStretch()
 
+    @property
+    def label(self) -> str:
+        return f"CCD{self.ccd}/S{self.slot}"
+
     def _on_disable_toggled(self, checked: bool):
         self.entry.setEnabled(not checked)
         if checked:
@@ -374,46 +413,66 @@ class CoreRow(QWidget):
     def is_disabled(self) -> bool:
         return self.disable_cb.isChecked()
 
-    def value(self) -> int | None:
+    def parse(self) -> tuple[str, int | None]:
+        """Returns (status, value).
+
+        status is one of: 'disabled', 'empty', 'ok', 'invalid', 'range'.
+
+        The old value() silently clamped out-of-range input and silently
+        swallowed unparseable text — so typing 999 quietly applied 20,
+        and typing "abc" quietly applied nothing. Both are now reported
+        to the caller instead.
+        """
         if self.is_disabled():
-            return None
+            return "disabled", None
         txt = self.entry.text().strip()
         if not txt:
-            return None
+            return "empty", None
         try:
             v = int(txt)
         except ValueError:
-            return None
-        return max(COPER_MIN, min(COPER_MAX, v))
+            return "invalid", None
+        if not (COPER_MIN <= v <= COPER_MAX):
+            return "range", v
+        return "ok", v
 
     def set_value(self, v):
-        self.entry.setText("" if v is None else str(v))
+        if v is None:
+            self.entry.clear()
+        else:
+            self.entry.setText(str(v))
 
     def set_disabled_state(self, disabled: bool):
-        self.disable_cb.setChecked(disabled)
+        self.disable_cb.setChecked(bool(disabled))
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
-        self.resize(520, 640)
+        self.setWindowTitle(f"{APP_TITLE} {APP_VERSION}")
+        self.resize(540, 660)
 
         icon_path = _find_icon()
         if icon_path:
             self.setWindowIcon(QIcon(icon_path))
 
-        PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+        self._profiles_ready = True
+        try:
+            PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Do not take the whole app down just because the config dir
+            # is unwritable; only profile save/load is affected.
+            self._profiles_ready = False
 
         layout_info = detect_ccd_layout()
-        self.ccd_count = layout_info["ccd_count"] or CCD_COUNT_FALLBACK
+        self.detected_ccds = layout_info["ccd_count"]
+        self.ccd_count = self.detected_ccds or CCD_COUNT_FALLBACK
         self.os_cores_per_ccd: dict[int, int] = layout_info["os_cores_per_ccd"]
         self.ccds = list(range(self.ccd_count))
         self.total_slots = self.ccd_count * SLOTS_PER_CCD
 
         # Any CCD whose OS-visible physical core count isn't the full
-        # 8 SMU slots means real-vs-OS core id mapping is ambiguous —
-        # this drives the warning banner.
+        # 8 SMU slots means real-vs-OS core id mapping is ambiguous.
         self.mismatch_ccds = [
             ccd for ccd in self.ccds
             if ccd in self.os_cores_per_ccd and self.os_cores_per_ccd[ccd] != SLOTS_PER_CCD
@@ -423,10 +482,23 @@ class MainWindow(QMainWindow):
         self._worker: HelperWorker | None = None
         self._ccd_columns: dict[int, QWidget] = {}
         self._ccd_separators: dict[int, QFrame] = {}
+        # Authoritative set of active CCDs. The old code re-derived this
+        # from widget.isVisible(), which is False for every child before
+        # the window is first shown — a latent source of wrong answers.
+        self._active_ccds: set[int] = set(self.ccds)
+        self._apply_buttons: list[QPushButton] = []
 
         self._build_ui()
         self._apply_theme()
         self._set_core_mode(all_ccds=True)
+
+        if not self.detected_ccds:
+            self._log(
+                f"CCD topology could not be read from sysfs — assuming "
+                f"{CCD_COUNT_FALLBACK} CCDs. Verify before applying.", "err"
+            )
+        if not self._profiles_ready:
+            self._log(f"Profile directory is not writable: {PROFILES_DIR}", "err")
 
     # ─────────────────────────────────────────── UI construction ──────
     def _build_ui(self):
@@ -436,7 +508,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        # ── Optional SMU-vs-OS mismatch warning ──
         if self.mismatch_ccds:
             mismatch_desc = ", ".join(
                 f"CCD{ccd}: {self.os_cores_per_ccd.get(ccd, '?')}/{SLOTS_PER_CCD} cores"
@@ -516,11 +587,14 @@ class MainWindow(QMainWindow):
         self.coall_entry = QLineEdit()
         self.coall_entry.setPlaceholderText(f"{COALL_MIN}..{COALL_MAX}")
         self.coall_entry.setFixedWidth(90)
+        self.coall_entry.setValidator(QIntValidator(COALL_MIN, COALL_MAX, self.coall_entry))
+        self.coall_entry.returnPressed.connect(self._apply_all_core)
         btn_apply_all = QPushButton("Apply All-Core")
         btn_apply_all.setObjectName("btn_accent")
         btn_apply_all.clicked.connect(self._apply_all_core)
         btn_reset = QPushButton("Reset")
         btn_reset.setObjectName("btn_danger")
+        btn_reset.setToolTip("Send --set-coall=0, clearing every core's offset.")
         btn_reset.clicked.connect(self._apply_reset)
         allcore_lay.addWidget(self.coall_entry)
         allcore_lay.addWidget(btn_apply_all)
@@ -548,6 +622,8 @@ class MainWindow(QMainWindow):
         core_header.addWidget(btn_clear)
         core_header.addWidget(btn_apply_cores)
         core_box_lay.addLayout(core_header)
+
+        self._apply_buttons = [btn_apply_all, btn_reset, btn_apply_cores]
 
         columns = QHBoxLayout()
         columns.setSpacing(10)
@@ -577,12 +653,9 @@ class MainWindow(QMainWindow):
                 sep.setFrameShape(QFrame.VLine)
                 sep.setStyleSheet(f"color:{GB_BG3};")
                 columns.addWidget(sep)
-                # This separator sits between the current column and the
-                # NEXT one, so its visibility should follow the next
-                # CCD's visibility (hide the divider when the CCD after
-                # it disappears), not the current CCD's.
-                next_ccd_id = self.ccds[col_i + 1]
-                self._ccd_separators[next_ccd_id] = sep
+                # The separator sits between this column and the NEXT
+                # one, so its visibility follows the next CCD.
+                self._ccd_separators[self.ccds[col_i + 1]] = sep
 
         core_box_lay.addLayout(columns)
         root.addWidget(core_box)
@@ -596,16 +669,21 @@ class MainWindow(QMainWindow):
         self.terminal.setReadOnly(True)
         self.terminal.setFont(QFont("Monospace", 8))
         self.terminal.setObjectName("terminal")
+        # Without a cap the log grows without bound over a long tuning
+        # session.
+        self.terminal.setMaximumBlockCount(MAX_LOG_BLOCKS)
         term_lay.addWidget(self.terminal)
         root.addWidget(term_box, stretch=1)
 
-        self._log(f"Ryzen Curve Optimizer started. {self.ccd_count} CCD(s) detected, "
-                   f"{SLOTS_PER_CCD} fixed SMU slots each ({self.total_slots} total).")
+        self._log(
+            f"{APP_TITLE} {APP_VERSION} started. {self.ccd_count} CCD(s), "
+            f"{SLOTS_PER_CCD} fixed SMU slots each ({self.total_slots} total)."
+        )
         if self.mismatch_ccds:
             self._log("Partially-populated CCD detected — see the notice above "
-                       "about SMU slot IDs vs. OS core IDs.", "cmd")
+                      "about SMU slot IDs vs. OS core IDs.", "cmd")
         self._log("Changes are applied via pkexec through the root helper — "
-                   "the pkexec prompt itself is your confirm/cancel step.")
+                  "the pkexec prompt itself is your confirm/cancel step.")
 
     def _apply_theme(self):
         self.setStyleSheet(f"""
@@ -666,6 +744,7 @@ class MainWindow(QMainWindow):
             }}
             QPushButton:hover {{ background-color: {GB_BG3}; }}
             QPushButton:pressed {{ background-color: {GB_BG1}; }}
+            QPushButton:disabled {{ color: {GB_BG4}; border-color: {GB_BG2}; }}
 
             QPushButton#btn_accent {{
                 background-color: {GB_AQUA_DIM};
@@ -698,47 +777,51 @@ class MainWindow(QMainWindow):
     # ─────────────────────────────────────────── log/terminal ─────────
     def _log(self, msg: str, level: str = "info"):
         ts = datetime.now().strftime("%H:%M:%S")
-        colors = {
-            "info": GB_FG3, "ok": GB_GREEN, "err": GB_RED, "cmd": GB_YELLOW,
-        }
+        colors = {"info": GB_FG3, "ok": GB_GREEN, "err": GB_RED, "cmd": GB_YELLOW}
         prefix = {"info": "  ", "ok": "OK", "err": "!!", "cmd": ">>"}.get(level, "  ")
         color = colors.get(level, GB_FG3)
+        # ryzenadj output and filesystem paths end up here verbatim; any
+        # '<' or '&' in them would corrupt or inject into the rich text.
+        safe = html.escape(str(msg)).replace("\n", "<br>")
         self.terminal.appendHtml(
             f'<span style="color:{GB_GREY};">[{ts}]</span> '
-            f'<span style="color:{color};">{prefix} {msg}</span>'
+            f'<span style="color:{color};">{prefix} {safe}</span>'
         )
-        sb = self.terminal.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        # appendHtml does not update the scrollbar range synchronously,
+        # so setValue(maximum()) could land short. Moving the cursor is
+        # reliable.
+        self.terminal.moveCursor(QTextCursor.End)
+        self.terminal.ensureCursorVisible()
 
     # ─────────────────────────────────────────── mode (primary/all) ───
     def _set_core_mode(self, all_ccds: bool):
-        active_ccds = set(self.ccds) if all_ccds else {self.ccds[0]} if self.ccds else set()
+        if not self.ccds:
+            return
+        self._active_ccds = set(self.ccds) if all_ccds else {self.ccds[0]}
 
         for ccd_id, widget in self._ccd_columns.items():
-            visible = ccd_id in active_ccds
+            visible = ccd_id in self._active_ccds
             widget.setVisible(visible)
             sep = self._ccd_separators.get(ccd_id)
             if sep is not None:
                 sep.setVisible(visible)
 
         for row in self.core_rows:
-            if row.ccd not in active_ccds:
-                row.set_value(None)
+            if row.ccd not in self._active_ccds:
                 row.set_disabled_state(False)
+                row.set_value(None)
 
-        label = f"CCD0 Only ({SLOTS_PER_CCD} slots)" if not all_ccds else f"All CCDs ({self.total_slots} slots)"
+        label = (f"All CCDs ({self.total_slots} slots)" if all_ccds
+                 else f"CCD0 Only ({SLOTS_PER_CCD} slots)")
         self._log(f"Core mode: {label}")
 
     def _active_rows(self) -> list[CoreRow]:
-        visible_ccds = {ccd for ccd, w in self._ccd_columns.items() if w.isVisible()}
-        if not visible_ccds:
-            return list(self.core_rows)
-        return [r for r in self.core_rows if r.ccd in visible_ccds]
+        return [r for r in self.core_rows if r.ccd in self._active_ccds]
 
     def _clear_core_fields(self):
         for row in self._active_rows():
-            row.set_value(None)
             row.set_disabled_state(False)
+            row.set_value(None)
         self._log("Per-core fields cleared.")
 
     # ─────────────────────────────────────────── apply actions ────────
@@ -762,15 +845,36 @@ class MainWindow(QMainWindow):
 
     def _apply_per_core(self):
         entries = []
+        problems = []
         skipped_disabled = 0
+
         for row in self._active_rows():
-            if row.is_disabled():
+            status, value = row.parse()
+            if status == "disabled":
                 skipped_disabled += 1
+            elif status == "empty":
                 continue
-            v = row.value()
-            if v is None:
-                continue
-            entries.append({"ccd": row.ccd, "ccx": row.ccx, "core": row.slot, "coper": v})
+            elif status == "invalid":
+                problems.append(f"{row.label}: not a number ('{row.entry.text().strip()}')")
+            elif status == "range":
+                problems.append(f"{row.label}: {value} is outside {COPER_MIN}..{COPER_MAX}")
+            else:
+                entries.append({
+                    "ccd": row.ccd, "ccx": row.ccx, "core": row.slot, "coper": value,
+                })
+
+        if problems:
+            # Refuse the whole batch. Applying the valid half of a curve
+            # and dropping the rest leaves the CPU in a state the user
+            # never described.
+            QMessageBox.warning(
+                self, "Invalid Values",
+                "Nothing was applied. Fix these first:\n\n" + "\n".join(problems),
+            )
+            for p in problems:
+                self._log(p, "err")
+            return
+
         if not entries:
             QMessageBox.information(self, "No Input", "No per-core values have been entered.")
             return
@@ -778,32 +882,49 @@ class MainWindow(QMainWindow):
             self._log(f"Skipping {skipped_disabled} disabled slot(s).")
         self._run_op("set_coper_batch", {"entries": entries})
 
+    def _set_busy(self, busy: bool):
+        for btn in self._apply_buttons:
+            btn.setEnabled(not busy)
+
     def _run_op(self, op: str, params: dict):
         if self._worker is not None and self._worker.isRunning():
             self._log("Previous operation still running, please wait.", "err")
             return
 
         self._log(f"Sending '{op}' via pkexec... (you may be prompted for a password)", "cmd")
-        self._worker = HelperWorker(op, params)
-        self._worker.finished_ok.connect(self._on_op_ok)
-        self._worker.finished_err.connect(self._on_op_err)
-        self._worker.start()
+        self._set_busy(True)
+        worker = HelperWorker(op, params, parent=self)
+        worker.finished_ok.connect(self._on_op_ok)
+        worker.finished_err.connect(self._on_op_err)
+        worker.finished.connect(self._on_worker_finished)
+        self._worker = worker
+        worker.start()
+
+    def _on_worker_finished(self):
+        self._set_busy(False)
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.deleteLater()
 
     def _on_op_ok(self, result: dict):
+        warning = result.get("_warning")
+        if warning:
+            self._log(warning, "err")
+
         if result.get("ok"):
             self._log("Operation applied successfully.", "ok")
         else:
-            self._log(f"Operation partially/fully failed: {result.get('error', '')}", "err")
+            detail = result.get("error") or result.get("message") or "see per-core results below"
+            self._log(f"Operation failed: {detail}", "err")
 
-        if "results" in result:
-            for r in result["results"]:
-                tag = "ok" if r.get("ok") else "err"
-                self._log(
-                    f"CCD{r.get('ccd')}/Slot{r.get('core')} "
-                    f"-> offset {r.get('coper')}  ({r.get('message', '')})",
-                    tag,
-                )
-        elif result.get("message"):
+        for r in result.get("results", []):
+            tag = "ok" if r.get("ok") else "err"
+            self._log(
+                f"CCD{r.get('ccd')}/S{r.get('core')} -> offset {r.get('coper')} "
+                f"({r.get('message', '')})",
+                tag,
+            )
+        if not result.get("results") and result.get("message"):
             self._log(result["message"])
 
     def _on_op_err(self, err: str):
@@ -811,49 +932,78 @@ class MainWindow(QMainWindow):
 
     # ─────────────────────────────────────────── profile save/load ────
     def _current_state(self) -> dict:
-        active = self._active_rows()
         cores = []
-        for row in active:
+        for row in self._active_rows():
+            status, value = row.parse()
             cores.append({
                 "ccd": row.ccd, "ccx": row.ccx, "slot": row.slot,
-                "coper": row.value(), "disabled": row.is_disabled(),
+                "coper": value if status == "ok" else None,
+                "disabled": row.is_disabled(),
             })
+        # The old code used lstrip("-").isdigit() as an int() guard,
+        # which accepts "--5" and then crashes inside int().
         coall_txt = self.coall_entry.text().strip()
-        coall = None
-        if coall_txt.lstrip("-").isdigit():
-            coall = int(coall_txt)
+        try:
+            coall = int(coall_txt) if coall_txt else None
+        except ValueError:
+            coall = None
         return {
+            "version": APP_VERSION,
+            "ccd_count": self.ccd_count,
             "coall": coall,
             "cores": cores,
         }
 
     def _reload_profile_list(self):
+        previous = self.profile_combo.currentText()
         self.profile_combo.clear()
         try:
             names = sorted(p.stem for p in PROFILES_DIR.glob("*.json"))
         except OSError:
             names = []
         self.profile_combo.addItems(names)
+        if previous:
+            idx = self.profile_combo.findText(previous)
+            if idx >= 0:
+                self.profile_combo.setCurrentIndex(idx)
 
     def _save_profile(self):
+        if not self._profiles_ready:
+            QMessageBox.critical(self, "Save Error", f"Profile directory is not writable:\n{PROFILES_DIR}")
+            return
         name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:")
-        if not ok or not name.strip():
+        if not ok:
             return
         name = name.strip()
-        safe_name = "".join(c for c in name if c.isalnum() or c in "_- ")
-        if not safe_name:
-            QMessageBox.warning(self, "Invalid Name", "Profile name contains invalid characters.")
+        if not PROFILE_NAME_RE.match(name):
+            QMessageBox.warning(
+                self, "Invalid Name",
+                "Use 1-64 characters: letters, digits, space, underscore or "
+                "hyphen, starting with a letter or digit.",
+            )
             return
 
-        path = PROFILES_DIR / f"{safe_name}.json"
+        path = PROFILES_DIR / f"{name}.json"
+        if path.exists():
+            reply = QMessageBox.question(
+                self, "Overwrite Profile", f"Profile '{name}' already exists. Overwrite?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
         try:
-            path.write_text(json.dumps(self._current_state(), indent=2, ensure_ascii=False))
+            # Write to a temp file then rename, so an interrupted write
+            # cannot leave a truncated profile behind.
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._current_state(), indent=2, ensure_ascii=False))
+            os.replace(tmp, path)
         except OSError as e:
             QMessageBox.critical(self, "Save Error", str(e))
             return
 
         self._reload_profile_list()
-        idx = self.profile_combo.findText(safe_name)
+        idx = self.profile_combo.findText(name)
         if idx >= 0:
             self.profile_combo.setCurrentIndex(idx)
         self._log(f"Profile saved: {path}")
@@ -869,27 +1019,39 @@ class MainWindow(QMainWindow):
         except (OSError, json.JSONDecodeError) as e:
             QMessageBox.critical(self, "Load Error", str(e))
             return
+        if not isinstance(data, dict):
+            QMessageBox.critical(self, "Load Error", "Profile file is not a JSON object.")
+            return
 
         coall = data.get("coall")
         self.coall_entry.setText("" if coall is None else str(coall))
 
         by_pos = {(r.ccd, r.ccx, r.slot): r for r in self.core_rows}
         for row in self.core_rows:
-            row.set_value(None)
             row.set_disabled_state(False)
+            row.set_value(None)
+
+        missing = 0
         for c in data.get("cores", []):
-            # Accept both the new "slot" key and the older "core" key
-            # (profiles saved by an earlier version of this applet).
-            slot = c.get("slot", c.get("core", 0))
-            key = (c.get("ccd", 0), c.get("ccx", 0), slot)
-            row = by_pos.get(key)
-            if row is None:
+            if not isinstance(c, dict):
                 continue
-            row.set_disabled_state(bool(c.get("disabled", False)))
-            if not c.get("disabled", False):
+            # Accept both the new "slot" key and the older "core" key.
+            slot = c.get("slot", c.get("core", 0))
+            row = by_pos.get((c.get("ccd", 0), c.get("ccx", 0), slot))
+            if row is None:
+                missing += 1
+                continue
+            disabled = bool(c.get("disabled", False))
+            row.set_disabled_state(disabled)
+            if not disabled:
                 row.set_value(c.get("coper"))
 
         self._log(f"Profile loaded: {name}")
+        if missing:
+            self._log(
+                f"{missing} slot(s) in the profile do not exist on this "
+                f"topology ({self.ccd_count} CCD(s)) and were ignored.", "err"
+            )
 
     def _delete_profile(self):
         name = self.profile_combo.currentText()
@@ -897,29 +1059,64 @@ class MainWindow(QMainWindow):
             return
         reply = QMessageBox.question(
             self, "Delete Profile", f"Delete profile '{name}'?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        path = PROFILES_DIR / f"{name}.json"
         try:
-            path.unlink(missing_ok=True)
+            (PROFILES_DIR / f"{name}.json").unlink(missing_ok=True)
         except OSError as e:
             QMessageBox.critical(self, "Delete Error", str(e))
             return
         self._reload_profile_list()
         self._log(f"Profile deleted: {name}")
 
+    # ─────────────────────────────────────────── shutdown ─────────────
+    def closeEvent(self, event):
+        """Qt prints 'QThread: Destroyed while thread is still running'
+        and may abort if the window closes mid-operation."""
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            reply = QMessageBox.question(
+                self, "Operation In Progress",
+                "An operation is still running. Wait for it to finish?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                event.ignore()
+                return
+            worker.wait(PKEXEC_TIMEOUT * 1000)
+        event.accept()
 
-def main():
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog=APP_ID, description=APP_TITLE)
+    parser.add_argument("-V", "--version", action="version",
+                        version=f"{APP_TITLE} {APP_VERSION}")
+    parser.add_argument("--detect", action="store_true",
+                        help="print the detected CCD topology and exit (no GUI)")
+    args = parser.parse_args()
+
+    if args.detect:
+        info = detect_ccd_layout()
+        print(json.dumps(info, indent=2))
+        return 0
+
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_TITLE)
+    app.setApplicationVersion(APP_VERSION)
+    # Lets Wayland compositors match the window to its .desktop entry,
+    # which is what makes the taskbar icon and app name show correctly.
+    app.setDesktopFileName(APP_ID)
+
     icon_path = _find_icon()
     if icon_path:
         app.setWindowIcon(QIcon(icon_path))
+
     win = MainWindow()
     win.show()
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
