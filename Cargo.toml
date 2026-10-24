@@ -1,0 +1,22 @@
+[package]
+name = "ryzen-curve-optimizer-helper"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Ryzen Curve Optimizer root helper (pkexec target): native SMU access, no ryzenadj"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde_json = "1"
+libc = "0.2"
+
+[[bin]]
+name = "ryzen-curve-optimizer-helper"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

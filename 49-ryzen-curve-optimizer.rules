@@ -1,0 +1,64 @@
+/*
+ * 49-ryzen-curve-optimizer.rules
+ *
+ * Decides who may run the Ryzen Curve Optimizer root helper without a
+ * password. The security level is chosen at install time
+ * (install.sh --security-level=N) and substituted below.
+ *
+ *   1  a member of `wheel` or `sudo` sitting at the machine (local + active
+ *      session) runs the helper silently.
+ *   2  no silent grants: the same session gets auth_admin_keep (one password,
+ *      then polkit's own cache window). Default.
+ *
+ * Everyone else -- SSH, another seat, a fast-user-switched session, service
+ * accounts -- always gets auth_admin, at every level.
+ *
+ * Why a .rules file rather than only <allow_active> in the .policy:
+ *
+ *   - The .policy defaults are only consulted when no rule matches, and some
+ *     distributions ship rules of their own (50-default.rules, vendor
+ *     packages) that match first and force auth_admin_keep for anything run
+ *     through org.freedesktop.policykit.exec. A 49-* file sorts ahead of them.
+ *
+ *   - It also covers the generic org.freedesktop.policykit.exec fallback
+ *     pkexec uses when it cannot match the helper to the pinned action -- matched
+ *     here only for the exact helper path below.
+ *
+ * Scope: only the one fixed program below, which install.sh creates root:root
+ * 0755 (a non-root user cannot add or alter a file there). The helper
+ * re-validates every request itself (strict integers, per-family ranges,
+ * all-or-nothing batches, fixed SMU opcodes), so the prompt is not what keeps
+ * a bad value out.
+ *
+ * Action ids are matched against an explicit allowlist, not by the
+ * com.ryzencurveoptimizer. prefix: an id in that namespace that is not listed
+ * here gets AUTH_ADMIN. When adding an action to the .policy, add its id here
+ * too (install.sh checks this).
+ *
+ * The live monitor ("VID + power") runs through the same helper and action, so
+ * at level 2 it asks for the password when it is switched on.
+ */
+
+// Only a local, active session of an admin (wheel or sudo) is granted silently;
+// everyone else (SSH, other seats, service accounts) gets auth_admin.
+function adminAtConsole(subject) {
+    return subject.local && subject.active &&
+        (subject.isInGroup("wheel") || subject.isInGroup("sudo"));
+}
+var HELPER = "@HELPER@";
+var SECURITY_LEVEL = @SECLEVEL@;
+var ACTION_IDS = ["com.ryzencurveoptimizer.set-curve"];
+
+polkit.addRule(function (action, subject) {
+    // Any other com.ryzencurveoptimizer.* id is unknown to this file: password, never silent.
+    if (action.id.indexOf("com.ryzencurveoptimizer.") === 0 && ACTION_IDS.indexOf(action.id) < 0) {
+        return polkit.Result.AUTH_ADMIN;
+    }
+    var ours = ACTION_IDS.indexOf(action.id) >= 0 ||
+        (action.id === "org.freedesktop.policykit.exec" && action.lookup("program") === HELPER);
+    if (!ours) { return; }
+    if (adminAtConsole(subject)) {
+        return SECURITY_LEVEL >= 2 ? polkit.Result.AUTH_ADMIN_KEEP : polkit.Result.YES;
+    }
+    return polkit.Result.AUTH_ADMIN;
+});

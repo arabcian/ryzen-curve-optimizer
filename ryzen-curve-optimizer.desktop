@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ryzen Curve Optimizer
+GenericName=CPU Curve Optimizer Tuner
+Comment=Tune AMD Ryzen Curve Optimizer voltage offsets via RyzenAdj
+Comment[tr]=RyzenAdj ile AMD Ryzen Curve Optimizer voltaj offsetlerini ayarla
+Exec=ryzen-curve-optimizer
+Icon=ryzen-curve-optimizer
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=ryzen;amd;undervolt;curve;optimizer;ryzenadj;cpu;
+StartupNotify=true
+StartupWMClass=ryzen-curve-optimizer
