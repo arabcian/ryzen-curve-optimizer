@@ -1,5 +1,7 @@
 # Ryzen Curve Optimizer
 
+<img width="1456" height="901" alt="Screenshot_20261025_012625" src="https://github.com/user-attachments/assets/41ec87eb-a119-4b95-af9d-52ae6fdaa3e9" />
+
 A small, standalone applet for tuning the AMD Ryzen Curve Optimizer on
 Zen3/Zen4/Zen5 mobile and Dragon/Fire Range CPUs: a Qt6 GUI with 21 colour
 themes, and a Rust root helper that talks to the CPU's SMU directly (no
