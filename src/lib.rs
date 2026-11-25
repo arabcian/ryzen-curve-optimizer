@@ -9,6 +9,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::Path;
 
+pub mod ocjournal;
 pub mod pmtable;
 pub mod ryzen_mon;
 pub mod smu;
@@ -106,6 +107,45 @@ pub fn secure_dir(p: &str) -> Result<(), String> {
     if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
         return Err(format!("{p} is not a root-owned private directory; refusing to use it"));
     }
+    Ok(())
+}
+
+/// This boot's id (empty when unreadable).
+pub fn boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_owned()).unwrap_or_default()
+}
+
+/// Reads a root-owned, not group/other-writable regular file (no symlinks), at most `max` bytes.
+/// The checks run on the opened descriptor, so the file cannot be swapped between check and read.
+pub fn read_root_file(p: &str, max: u64) -> Option<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(p).ok()?;
+    let m = f.metadata().ok()?;
+    if !m.is_file() || m.uid() != 0 || m.mode() & 0o022 != 0 || m.len() > max { return None; }
+    let mut s = String::new();
+    (&f).take(max + 1).read_to_string(&mut s).ok()?;
+    (s.len() as u64 <= max).then_some(s)
+}
+
+/// Atomic root-owned write: tmp (O_EXCL, no symlink, 0644) + fsync + rename + fsync(dir). A reader
+/// sees the old file or the new one, never a truncated one, also across a power cut.
+pub fn write_root_file(p: &str, body: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = Path::new(p);
+    let dir = path.parent().ok_or_else(|| format!("{p}: no parent directory"))?;
+    let tmp = format!("{p}.{}.tmp", std::process::id());
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&tmp)
+        .map_err(|e| format!("{tmp}: {e}"))?;
+    let res = f.write_all(body)
+        .and_then(|_| f.set_permissions(std::fs::Permissions::from_mode(0o644)))
+        .and_then(|_| f.sync_all());
+    drop(f);
+    if let Err(e) = res { let _ = std::fs::remove_file(&tmp); return Err(format!("{tmp}: {e}")); }
+    if let Err(e) = std::fs::rename(&tmp, p) { let _ = std::fs::remove_file(&tmp); return Err(format!("{p}: {e}")); }
+    if let Ok(d) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC).open(dir) { let _ = d.sync_all(); }
     Ok(())
 }
 

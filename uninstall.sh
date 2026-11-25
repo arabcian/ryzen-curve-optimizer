@@ -41,6 +41,7 @@ info() { echo "-> $*"; }
 # Files/dirs from the current layout, plus the legacy paths of the Python version.
 FILES=(
     "$DESTDIR$PREFIX/bin/$APP_ID"
+    "$DESTDIR$PREFIX/bin/ryzen-cpustress"
     "$DESTDIR$PREFIX/share/applications/$APP_ID.desktop"
     "$DESTDIR$PREFIX/share/icons/hicolor/128x128/apps/$APP_ID.png"
     "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/$APP_ID.svg"
@@ -53,6 +54,7 @@ DIRS=(
     "$DESTDIR$PREFIX/share/$APP_ID"
     "$DESTDIR/usr/local/lib/$APP_ID"
     "$DESTDIR/usr/local/share/$APP_ID"
+    "$DESTDIR/var/lib/$APP_ID"
 )
 
 for f in "${FILES[@]}"; do
@@ -70,7 +72,7 @@ for d in "${DIRS[@]}"; do
 done
 
 if [ -z "$DESTDIR" ]; then
-    rm -rf "/run/$APP_ID"   # tmpfs: SMN lock file only
+    rm -rf "/run/$APP_ID"   # tmpfs: SMN lock, helper locks, recorded CO state
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1 || true
     fi

@@ -3,3 +3,5 @@
 /home/user/ryzen-curve-optimizer/target/debug/deps/ryzen_curve_optimizer_helper-2ca3fbc0c202061d: src/main.rs
 
 src/main.rs:
+
+# env-dep:CARGO_PKG_VERSION=2.0.0

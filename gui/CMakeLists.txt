@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Svg)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Svg DBus)
 
 # Where the root helper lives. Must match the polkit exec.path annotation.
 set(RCO_HELPER_DIR "/usr/lib/ryzen-curve-optimizer" CACHE PATH "Installed root helper directory")
@@ -16,6 +16,16 @@ add_executable(ryzen-curve-optimizer
     src/privileged.cpp src/privileged.h
     src/trialbar.cpp   src/trialbar.h
     src/ryzentab.cpp   src/ryzentab.h
+    src/cosearchdialog.cpp src/cosearchdialog.h
+    src/costrategy.cpp src/costrategy.h
+    src/coevidence.cpp src/coevidence.h
+    src/coinsights.cpp src/coinsights.h
+    src/cpustress.cpp  src/cpustress.h
+    src/curvestate.cpp src/curvestate.h
+    src/notify.cpp     src/notify.h
+    src/platformprofile.cpp src/platformprofile.h
+    src/sysinfo.cpp    src/sysinfo.h
+    src/userhelper.cpp src/userhelper.h
     src/sysfs.h
 )
 
@@ -61,4 +71,26 @@ if(RCO_HARDEN)
     endif()
 endif()
 
-target_link_libraries(ryzen-curve-optimizer PRIVATE Qt6::Widgets Qt6::Svg)
+target_link_libraries(ryzen-curve-optimizer PRIVATE Qt6::Widgets Qt6::Svg Qt6::DBus)
+
+# ── Unit tests (Qt Core only): CO Search strategy / evidence / archive and the CPU stress logic ──
+option(RCO_BUILD_TESTS "Build the unit tests" OFF)
+if(RCO_BUILD_TESTS)
+    enable_testing()
+    foreach(spec IN ITEMS
+            "cpustress|src/cpustress.cpp"
+            "costrategy|src/costrategy.cpp"
+            "coinsights|src/coinsights.cpp+src/costrategy.cpp"
+            "coevidence|src/coevidence.cpp+src/costrategy.cpp"
+            "coarchive|"
+            "cohistory|")
+        string(REPLACE "|" ";" parts "${spec}")
+        list(GET parts 0 test)
+        list(GET parts 1 extra)
+        string(REPLACE "+" ";" extra "${extra}")
+        add_executable(rco-${test}-test tests/${test}_test.cpp ${extra})
+        target_link_libraries(rco-${test}-test PRIVATE Qt6::Core)
+        target_compile_definitions(rco-${test}-test PRIVATE QT_NO_KEYWORDS)
+        add_test(NAME ${test} COMMAND rco-${test}-test)
+    endforeach()
+endif()

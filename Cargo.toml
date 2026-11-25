@@ -6,6 +6,10 @@ rust-version = "1.74"
 description = "Ryzen Curve Optimizer root helper (pkexec target): native SMU access, no ryzenadj"
 license = "GPL-3.0-or-later"
 
+[workspace]
+members = [".", "crates/ryzen-cpustress"]
+resolver = "2"
+
 [dependencies]
 serde_json = "1"
 libc = "0.2"

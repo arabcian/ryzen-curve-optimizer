@@ -85,6 +85,18 @@ explains this.
   (★ marks the two best cores), and — with *VID + power* ticked — per-core VID
   volts and RAPL watts, plus which SMU limit (PPT/TDC/EDC/THM) is holding the
   clocks when `ryzen_smu` exports its PM table.
+- **CO Search** (Ryzen tab → *CO Search…*): an automatic, crash-guarded search for the most
+  negative stable offset per core or all-core, using `ryzen-cpustress --load co` probes and a
+  final full-curve verification. It starts only from a recorded stock state, journals every trial,
+  survives reboots (crash guards per physical core, resume / recovery), supports manual tuning, and
+  keeps a result archive with evidence and insights. See `docs/CO_SEARCH_*.md`.
+- **CPU stability test** (`ryzen-cpustress`): per-core and all-core work with a known result
+  (SSE / AVX2 / AVX-512 / power / CO loads), run as the user; a saved profile shows the result of
+  its last test in the profile row.
+- **Safer apply**: a failed per-core batch is rolled back by replaying the previous offsets when
+  every slot supplies one (otherwise back to stock); curve journal and recorded CO state under
+  `/var/lib/ryzen-curve-optimizer` and `/run/ryzen-curve-optimizer`.
+- Profile diff (compare saved profiles), searchable controls, desktop notifications.
 - 21 colour themes (see [Themes](#themes)).
 - An output/log pane showing every applied command and result.
 
@@ -284,15 +296,18 @@ It also cleans up leftovers from the Python version. `--purge` refuses a home wh
 
 - `src/` — the root helper (Rust): `main.rs` protocol and validation, `smu.rs` native SMU
   mailbox, `ryzen_mon.rs` / `pmtable.rs` read-only monitor, `stream.rs`, `lib.rs` plumbing.
-- `gui/` — the GUI (C++/Qt6): `ryzentab.cpp` main view, `theme.cpp` themes, `privileged.cpp`
-  async `pkexec` runner, `trialbar.cpp` trial apply.
+- `crates/ryzen-cpustress/` — the CPU stability test used by CO Search (runs as the user).
+- `gui/` — the GUI (C++/Qt6): `ryzentab.cpp` main view, `cosearchdialog.cpp` / `costrategy.cpp` /
+  `coevidence.cpp` / `coinsights.cpp` CO Search, `cpustress.cpp` test records, `theme.cpp` themes,
+  `privileged.cpp` async `pkexec` runner, `trialbar.cpp` trial apply.
+- `docs/` — CO Search design notes.
 - `com.ryzencurveoptimizer.policy` — polkit action pinned to the helper.
 - `49-ryzen-curve-optimizer.rules` — polkit rules (security level).
 - `ryzen-curve-optimizer.desktop` — application-menu entry.
 - `install.sh` / `uninstall.sh` — installer (with migration) / uninstaller.
 - `icon.png` / `icon.svg` — application icon.
 
-Tests: `cargo test` (SMU encodings, tables, ranges, mailbox behaviour against a fake SMU).
+Tests: `cargo test --release --workspace` (SMU encodings, tables, ranges, mailbox behaviour against a fake SMU, stress-test kernels) and, for the GUI logic, `cmake -S gui -B gui/build -DRCO_BUILD_TESTS=ON && cmake --build gui/build && ctest --test-dir gui/build` (CO Search strategy / evidence / archive, CPU stress records).
 
 ## License / attribution
 

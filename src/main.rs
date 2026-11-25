@@ -2,7 +2,8 @@
 //!
 //! JSON protocol, one request on stdin, one JSON line on stdout:
 //!   {"op": "set_coall", "params": {"value": -20}}
-//!   {"op": "set_coper_batch", "params": {"entries": [{ccd,ccx,core,coper}, ...]}}
+//!   {"op": "set_coper_batch", "params": {"entries": [{ccd,ccx,core,coper[,prev]}, ...], "reset": true}}
+//!       both take an optional "profile": NAME (≤ 64 bytes) — only the curve journal uses it
 //!   {"op": "reset"}
 //!   {"op": "probe"}
 //!       read-only: detected family, SMU transport, kernel lockdown, allowed offset range (no CO write).
@@ -17,7 +18,7 @@
 //! never clamped.
 
 use ryzen_curve_optimizer_helper::smu::Smu;
-use ryzen_curve_optimizer_helper::{finish, helper_lock, init, pmtable, ryzen_mon, smu, stream, watchdog};
+use ryzen_curve_optimizer_helper::{finish, helper_lock, init, ocjournal, pmtable, read_root_file, ryzen_mon, secure_dir, smu, stream, watchdog, write_root_file};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -243,12 +244,58 @@ fn run() -> Value {
         Some(Value::Object(m)) => m,
         Some(_) => return json!({"ok": false, "error": "params must be a JSON object"}),
     };
-    handler(params).unwrap_or_else(|Invalid(m)| json!({"ok": false, "error": format!("invalid request: {m}")}))
+    let out = handler(params).unwrap_or_else(|Invalid(m)| json!({"ok": false, "error": format!("invalid request: {m}")}));
+    if out["ok"] == true {
+        let op = op.and_then(Value::as_str).unwrap_or("");
+        record_state(op, params);
+        // Curve journal: which Curve Optimizer state is in effect from now on. A saved profile applied
+        // by name is journalled by that name.
+        let profile = params.get("profile").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);
+        match (op, profile) {
+            ("reset", _) => ocjournal::record("cpu_co", "reset"),
+            ("set_coall", p) => match (params.get("value").and_then(Value::as_i64), p) {
+                (Some(0), _) => ocjournal::record("cpu_co", "reset"),
+                (Some(_), Some(n)) => ocjournal::record("cpu_co", &format!("profile:{n}")),
+                (Some(v), None) => ocjournal::record("cpu_co", &format!("all-core {v}")),
+                (None, _) => {}
+            },
+            ("set_coper_batch", Some(n)) => ocjournal::record("cpu_co", &format!("profile:{n}")),
+            ("set_coper_batch", None) => ocjournal::record("cpu_co", "per-core"),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// What the SMU now holds (tmpfs: a reboot resets both). The SMU cannot be read back, so CO Search
+/// uses this record to prove the starting state is stock. All-core offsets replace the state;
+/// per-core batches update their cores.
+const CO_STATE: &str = "/run/ryzen-curve-optimizer/co-state.json";
+
+fn record_state(op: &str, params: &Map<String, Value>) {
+    let mut st: Value = read_root_file(CO_STATE, 64 * 1024).and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &Value| v["state"].is_object() || v["state"].is_string()).unwrap_or_else(|| json!({"state": "reset"}));
+    match op {
+        "reset" => st = json!({"state": "reset"}),
+        "set_coall" => st = json!({"state": {"all": params.get("value").cloned().unwrap_or(Value::Null)}}),
+        "set_coper_batch" => {
+            if !st["state"].is_object() { st["state"] = json!({}); }
+            for e in params.get("entries").and_then(Value::as_array).into_iter().flatten() {
+                let k = format!("{}.{}.{}", e["ccd"], e["ccx"], e["core"]);
+                st["state"][k] = e["coper"].clone();
+            }
+        }
+        _ => return,
+    }
+    if secure_dir("/run/ryzen-curve-optimizer").is_ok() { let _ = write_root_file(CO_STATE, st.to_string().as_bytes()); }
 }
 
 fn main() {
     init();
-    std::process::exit(finish(run()));
+    let mut v = run();
+    // Version handshake: the GUI warns when its helpers come from another install.
+    if let Some(o) = v.as_object_mut() { o.insert("helper_version".into(), json!(env!("CARGO_PKG_VERSION"))); }
+    std::process::exit(finish(v));
 }
 
 #[cfg(test)]

@@ -1,0 +1,1 @@
+/home/user/ryzen-curve-optimizer/target/release/libryzen_curve_optimizer_helper.rlib: /home/user/ryzen-curve-optimizer/src/lib.rs /home/user/ryzen-curve-optimizer/src/ocjournal.rs /home/user/ryzen-curve-optimizer/src/pmtable.rs /home/user/ryzen-curve-optimizer/src/ryzen_mon.rs /home/user/ryzen-curve-optimizer/src/smu.rs /home/user/ryzen-curve-optimizer/src/stream.rs
