@@ -264,6 +264,20 @@ Python/`ryzenadj` version (the python script at `bin/ryzen-curve-optimizer`, the
 `ryzenadj` and PySide6 are no longer used and can be uninstalled. If an old Python window
 is still open, close it and start the new one. Gruvbox, the old look, is one of the themes.
 
+## Alongside Centurion
+
+This app and [Centurion](https://github.com/arabcian/centurion) can be installed on the same machine;
+every installed file here is named `ryzen-curve-optimizer*` (helper, polkit action, rules, desktop entry,
+`ryzen-cpustress`), so nothing of Centurion's is overwritten.
+
+- **Shared:** the per-user profile folder `~/.config/ryzen-curve-optimizer/profiles/` (same format) and the
+  SMU lock `/run/lock/access_pci.lock`. `uninstall.sh --purge` keeps `profiles/` while Centurion is
+  installed.
+- **Not shared:** the recorded CO state and curve journal (`/run/ryzen-curve-optimizer`,
+  `/var/lib/ryzen-curve-optimizer` here, `/run/centurion` and `/var/lib/centurion` there). The SMU cannot
+  be read back, so after the other app applied offsets, CO Search refuses to start until you reset
+  to stock from the app you are using. Apply Curve Optimizer offsets from one app at a time.
+
 ## Themes
 
 The look is one source of truth (`gui/src/theme.cpp`): a palette of colour tokens

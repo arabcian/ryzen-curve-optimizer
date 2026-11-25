@@ -23,6 +23,8 @@ POLKIT_ACTION_DIR="/usr/share/polkit-1/actions"
 POLKIT_RULESDIR="${POLKIT_RULESDIR:-/etc/polkit-1/rules.d}"
 
 PURGE=0
+CENTURION=0
+for d in /usr/libexec/centurion /usr/local/libexec/centurion /etc/centurion; do [ -d "$d" ] && CENTURION=1; done
 for arg in "$@"; do
     case "$arg" in
         --purge) PURGE=1 ;;
@@ -100,8 +102,15 @@ if [ "$PURGE" -eq 1 ]; then
             real_home="$(realpath -e -- "$home")" || continue
             [ -d "$profile_dir" ] && [ ! -L "$profile_dir" ] \
                 && [ "$(realpath -e -- "$profile_dir")" = "$real_home/.config/$APP_ID" ] || continue
-            echo "   removing $profile_dir"
-            rm -rf -- "$profile_dir"
+            # Centurion keeps its CPU profiles in the same directory (profiles/): while it is installed
+            # only this app's own settings go, never the shared profiles.
+            if [ "$CENTURION" -eq 1 ]; then
+                echo "   removing settings in $profile_dir (profiles/ kept: shared with Centurion)"
+                find "$profile_dir" -mindepth 1 -maxdepth 1 ! -name profiles -exec rm -rf -- {} +
+            else
+                echo "   removing $profile_dir"
+                rm -rf -- "$profile_dir"
+            fi
         fi
     done < <(cat /etc/passwd)
 else
