@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(enc_coall(-20) & 0xFFFFF, 0x100000 - 20);
         assert_eq!(enc_coall(0), 0);
         assert_eq!(enc_coall(7), 7);
-        // Same vectors as the old ryzen-co-helper test.
+        // Same vectors as the old ryzen-curve-optimizer-helper test.
         assert_eq!(enc_coper(1, 0, 3, -20), 0x10300000 | 0xFFEC);
         assert_eq!(enc_coper(0, 0, 0, 5), 5);
         assert_eq!(enc_coper(15, 15, 15, -50), 0xFFF00000 | 0xFFCE);

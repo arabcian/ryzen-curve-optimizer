@@ -237,7 +237,7 @@ fn run() -> Value {
                      op.map(|v| v.to_string()).unwrap_or_else(|| "None".into()))}),
         };
     watchdog(120);
-    let _lock = match helper_lock("ryzen-co-helper") { Ok(l) => l, Err(e) => return json!({"ok": false, "error": e}) };
+    let _lock = match helper_lock("ryzen-curve-optimizer-helper") { Ok(l) => l, Err(e) => return json!({"ok": false, "error": e}) };
     let empty = Map::new();
     let params = match obj.get("params") {
         None | Some(Value::Null) => &empty,

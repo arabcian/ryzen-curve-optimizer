@@ -59,7 +59,7 @@ static constexpr int MONITOR_MS = 1000;
 static constexpr double LIMIT_PCT = 95.0;  // a limit counts as holding the CPU at this share of it
 static constexpr int COLS = 7;  // Slot, Offset, Disable, CPPC, MHz, V, W
 
-static QString helperPath() { return privileged::helperPath(QStringLiteral("ryzen-co-helper")); }
+static QString helperPath() { return privileged::helperPath(QStringLiteral("ryzen-curve-optimizer-helper")); }
 
 // ── topology ────────────────────────────────────────────────────────────────
 
@@ -421,7 +421,7 @@ RyzenTab::RyzenTab(QWidget *parent) : QWidget(parent), layout_(ryzen::detect()) 
     msrOn_ = new QCheckBox("VID + power");
     msrOn_->setToolTip("Per-core VID (MSR 0xC0010293) and RAPL core/package energy (MSR 0xC001029A/B), the same\n"
                        "registers CoreFreq reads, through the stock msr driver: one root helper per session\n"
-                       "(ryzen-co-helper monitor_stream), only while this tab is visible. No CoreFreq module.");
+                       "(ryzen-curve-optimizer-helper monitor_stream), only while this tab is visible. No CoreFreq module.");
     msrOn_->setChecked(QSettings(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) +
                                  QStringLiteral("/ryzen-curve-optimizer/gui.ini"), QSettings::IniFormat).value("ryzen/msr_monitor", false).toBool());
     connect(msrOn_, &QCheckBox::toggled, this, [this](bool on) {
@@ -913,7 +913,7 @@ bool RyzenTab::applyNamedProfile(const QString &name) {
     bool anyCore = false;
     for (Slot *s : activeSlots()) anyCore |= parse(*s).first == Parse::Ok;
     const bool hasCoall = !coall_->text().trimmed().isEmpty();
-    // A per-core batch resets every core to 0 first (ryzen-co-helper), so an all-core value sent
+    // A per-core batch resets every core to 0 first (ryzen-curve-optimizer-helper), so an all-core value sent
     // before it would be overwritten at once: the all-core offset goes out only without per-core values.
     if (anyCore) return applyPerCore();
     if (hasCoall) return applyAllCore();
@@ -1299,7 +1299,7 @@ void RyzenTab::startMsrStream() {
     QString pkexec;
     for (const char *c : {"/usr/bin/pkexec", "/bin/pkexec"})
         if (QFileInfo(QString::fromLatin1(c)).isFile()) { pkexec = QString::fromLatin1(c); break; }
-    if (pkexec.isEmpty() || !QFileInfo(helperPath()).isFile()) { showMsr({{"error", "pkexec or ryzen-co-helper not found"}}); return; }
+    if (pkexec.isEmpty() || !QFileInfo(helperPath()).isFile()) { showMsr({{"error", "pkexec or ryzen-curve-optimizer-helper not found"}}); return; }
     // Parented to the app, not the tab: once pkexec has exec'd the root helper we cannot kill
     // it (EPERM), and a QProcess destructor would block the GUI waiting for it. Closing stdin
     // makes it exit within one interval.
@@ -1316,7 +1316,7 @@ void RyzenTab::startMsrStream() {
             if (o.isEmpty() || o.value("stream_end").toBool()) continue;
             if (!o.value("ok").toBool()) {
                 const QString err = o.value("error").toString();
-                showMsr({{"error", err.startsWith(QLatin1String("unknown op")) ? QStringLiteral("installed ryzen-co-helper predates the monitor — reinstall")
+                showMsr({{"error", err.startsWith(QLatin1String("unknown op")) ? QStringLiteral("installed ryzen-curve-optimizer-helper predates the monitor — reinstall")
                                                                               : err}});
                 continue;
             }

@@ -2,7 +2,7 @@
 #include <QHash>
 // Ryzen Curve Optimizer tab — port of ryzen_curve_optimizer.py.
 // Per-slot CO offsets on the fixed 8-slot-per-CCD SMU grid, all-core
-// offset, reset, and per-user profiles; writes via ryzen-co-helper.
+// offset, reset, and per-user profiles; writes via ryzen-curve-optimizer-helper.
 #include <QJsonObject>
 #include <QMap>
 #include <QSet>
@@ -102,7 +102,7 @@ private:
     QMap<int, QList<std::optional<int>>> cppcPrevLive_;         // per CCD: live ranks at the previous refresh
 
     // Live monitor (no CoreFreq module): MHz / temperatures / boost from sysfs+procfs every
-    // tick; VID volts and RAPL watts from ryzen-co-helper's monitor_stream (root, MSRs).
+    // tick; VID volts and RAPL watts from ryzen-curve-optimizer-helper's monitor_stream (root, MSRs).
     void monitorTick();
     void startMsrStream();
     void stopMsrStream();

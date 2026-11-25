@@ -11,7 +11,7 @@ struct RequestClaims { std::vector<Claim> claims; bool recoveryOverride=false; }
 inline bool conflicts(const Claim &a,const Claim &b){return a.resource==b.resource&&(a.access==Access::Write||b.access==Access::Write);}
 inline RequestClaims classify(std::string_view helper,std::string_view op){
     using R=Resource;using A=Access;
-    if(helper=="ryzen-co-helper"){
+    if(helper=="ryzen-curve-optimizer-helper"){
         if(op=="probe")return {{{R::CpuCurve,A::Read}},false};
         if(op=="set_coall"||op=="set_coper_batch"||op=="reset")return {{{R::CpuCurve,A::Write}},op=="reset"};
     }else if(helper=="intel-uv-helper"){

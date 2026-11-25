@@ -424,7 +424,7 @@ CoSearchDialog::CoSearchDialog(QWidget *parent) : QDialog(parent), notifier_(new
     limit_ = new QSpinBox;
     limit_->setRange(-50, -5);
     limit_->setValue(-30);
-    limit_->setToolTip(tr("Most negative offset to try. The CPU's own allowed range (ryzen-co-helper) still applies."));
+    limit_->setToolTip(tr("Most negative offset to try. The CPU's own allowed range (ryzen-curve-optimizer-helper) still applies."));
     row1->addWidget(mode_);
     row1->addWidget(new QLabel(tr("Level:")));
     row1->addWidget(level_);
@@ -628,7 +628,7 @@ static bool blockingReset() {
         if (QFileInfo(QString::fromLatin1(c)).isFile()) { pkexec = QString::fromLatin1(c); break; }
     if (pkexec.isEmpty()) return false;
     QProcess p;
-    p.start(pkexec, {privileged::helperPath("ryzen-co-helper")});
+    p.start(pkexec, {privileged::helperPath("ryzen-curve-optimizer-helper")});
     if (!p.waitForStarted(3000)) return false;
     p.write(QJsonDocument(QJsonObject{{"op", "reset"}}).toJson(QJsonDocument::Compact) + '\n');
     p.closeWriteChannel();
@@ -652,7 +652,7 @@ CoSearchDialog::~CoSearchDialog() {
     }
     const bool inFlight = applying_;
     bool ok = blockingReset();
-    // An SMU write still in flight may land after that reset (ryzen-co-helper serialises on its lock):
+    // An SMU write still in flight may land after that reset (ryzen-curve-optimizer-helper serialises on its lock):
     // reset once more after it has had time to finish.
     if (inFlight) { QThread::msleep(1500); ok = blockingReset() && ok; }
     // A quit is not a crash: with the curve confirmed at stock, the trial in flight is marked as cut short
@@ -910,13 +910,13 @@ bool CoSearchDialog::acAvailable() {
 // failed, cancelled or malformed capability reply.
 void CoSearchDialog::probeTools(std::function<void(bool)> then) {
     if (preparing_ || running_ || recoveryBusy_ || perfTest_) return;
-    if (privileged::resourceActive(QStringLiteral("ryzen-co-helper"))) {
+    if (privileged::resourceActive(QStringLiteral("ryzen-curve-optimizer-helper"))) {
         QMessageBox::warning(this,tr("Search locked"),tr("A CPU curve helper is still running. Wait for it to exit before starting or resuming."));
         then(false); return;
     }
     testProgram_ = QStandardPaths::findExecutable("ryzen-cpustress");
-    if (testProgram_.isEmpty() || !QFileInfo(privileged::helperPath("ryzen-co-helper")).isExecutable()) {
-        QMessageBox::warning(this, tr("Missing tools"), tr("Install ryzen-cpustress and ryzen-co-helper first."));
+    if (testProgram_.isEmpty() || !QFileInfo(privileged::helperPath("ryzen-curve-optimizer-helper")).isExecutable()) {
+        QMessageBox::warning(this, tr("Missing tools"), tr("Install ryzen-cpustress and ryzen-curve-optimizer-helper first."));
         then(false); return;
     }
     preparing_ = true; probeCancelled_ = false;
@@ -948,7 +948,7 @@ void CoSearchDialog::probeTools(std::function<void(bool)> then) {
         if (!loads.value("power").toBool()) {
             QMessageBox::warning(this,tr("CPU not supported"),tr("This CPU has no AVX2 / FMA, which the verification's power load needs.")); then(false); return;
         }
-        if (privileged::resourceActive(QStringLiteral("ryzen-co-helper"))) {
+        if (privileged::resourceActive(QStringLiteral("ryzen-curve-optimizer-helper"))) {
             QMessageBox::warning(this,tr("Search locked"),tr("A CPU curve helper is still running. Wait for it to exit before starting or resuming.")); then(false); return;
         }
         then(acAvailable());
@@ -1635,7 +1635,7 @@ void CoSearchDialog::endRecovery() {
 void CoSearchDialog::offerResume() {
     if (operationActive() || !QFileInfo::exists(journalPath())) return;
     recoveryCancelled_ = false;
-    if (privileged::resourceActive(QStringLiteral("ryzen-co-helper"))) {
+    if (privileged::resourceActive(QStringLiteral("ryzen-curve-optimizer-helper"))) {
         QMessageBox::warning(this,tr("Search locked"),tr("A CPU curve helper is still running. Wait for it to exit before starting or resuming.")); return;
     }
     QFile f(journalPath());
@@ -1666,7 +1666,7 @@ void CoSearchDialog::offerResume() {
         if (!sameBoot) { if (removeJournal()) after(); return; }
         beginRecovery();
         note(tr("Resetting the CPU curve to stock before discarding the interrupted search…"));
-        privileged::runUntilExit(privileged::helperPath("ryzen-co-helper"), QJsonObject{{"op", "reset"}}, this,
+        privileged::runUntilExit(privileged::helperPath("ryzen-curve-optimizer-helper"), QJsonObject{{"op", "reset"}}, this,
             [this, after, unreadable, removeJournal](const privileged::Result &r) {
                 const auto release = qScopeGuard([this]{ endRecovery(); });
                 if (recoveryCancelled_) {
@@ -1930,7 +1930,7 @@ void CoSearchDialog::offerResume() {
         if (crashed) note(tr("System logs: %1").arg(verdict.summary));
         const std::optional<Trial> again = cleanExit ? interrupted : std::nullopt;
         beginRecovery();
-        privileged::runUntilExit(privileged::helperPath("ryzen-co-helper"), QJsonObject{{"op", "reset"}}, this,
+        privileged::runUntilExit(privileged::helperPath("ryzen-curve-optimizer-helper"), QJsonObject{{"op", "reset"}}, this,
             [this, again](const privileged::Result &r) {
                 endRecovery();
                 if (!r.ok()) { note(tr("Reset failed: %1. Not resuming.").arg(r.message()), theme::DANGER); search_.reset(); return; }
@@ -2007,7 +2007,7 @@ void CoSearchDialog::launch() {
     // Confirmation and recovery reset may have taken time. Recheck the
     // recorded stock state, AC and game ownership before starting a trial.
     if (!acAvailable()) { replay_.reset(); return; }
-    if (privileged::resourceActive(QStringLiteral("ryzen-co-helper")) || scenes::gameSessions() > 0 || curvestate::current("cpu") != "stock") {
+    if (privileged::resourceActive(QStringLiteral("ryzen-curve-optimizer-helper")) || scenes::gameSessions() > 0 || curvestate::current("cpu") != "stock") {
         replay_.reset();
         QMessageBox::warning(this,tr("Search locked"),tr("CPU curve or game tuning ownership changed before launch. No trial was started.")); return;
     }
@@ -2120,7 +2120,7 @@ void CoSearchDialog::step() {
     note(decisionText(*trial_), theme::INFO);
     mceBefore_ = mceCounters();
     applying_ = true;
-    privileged::runUntilExit(privileged::helperPath("ryzen-co-helper"), req, this, [this](const privileged::Result &r) {
+    privileged::runUntilExit(privileged::helperPath("ryzen-curve-optimizer-helper"), req, this, [this](const privileged::Result &r) {
         applying_ = false;
         if (!running_) return;
         if (!r.ok()) { reset(tr("SMU write rejected: %1").arg(r.message())); return; }
@@ -2390,14 +2390,14 @@ void CoSearchDialog::requestStockReset(const QString &reason) {
     if (!running_ || !resetting_) return;
     // An emergency reset may have started while the search owned the lease.
     // Wait asynchronously; never let the orchestrated reset overtake a live write.
-    if (privileged::resourceActive(QStringLiteral("ryzen-co-helper")) ||
+    if (privileged::resourceActive(QStringLiteral("ryzen-curve-optimizer-helper")) ||
         privileged::resourceActive(QStringLiteral("intel-uv-helper"))) {
         QTimer::singleShot(250, this, [this, reason] { requestStockReset(reason); });
         return;
     }
     if (!cpuLease_) cpuLease_ = privileged::acquireCpuCurveLease(this);
     if (!cpuLease_) { done(false, reason + tr(" — CPU curve ownership unavailable; no reset dispatched.")); return; }
-    privileged::runUntilExit(privileged::helperPath("ryzen-co-helper"), QJsonObject{{"op", "reset"}}, this,
+    privileged::runUntilExit(privileged::helperPath("ryzen-curve-optimizer-helper"), QJsonObject{{"op", "reset"}}, this,
         [this, reason](const privileged::Result &r) { done(r.ok(), reason + (r.ok() ? QString() : QStringLiteral("; reset FAILED: ") + r.message())); },
         120000, [this] { note(tr("CPU helper timed out; waiting for its actual exit before continuing."), theme::WARN); }, cpuLease_);
 }
