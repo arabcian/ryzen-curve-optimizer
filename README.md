@@ -277,7 +277,8 @@ every installed file here is named `ryzen-curve-optimizer*` (helper, polkit acti
 - **Not shared:** the recorded CO state and curve journal (`/run/ryzen-curve-optimizer`,
   `/var/lib/ryzen-curve-optimizer` here, `/run/centurion` and `/var/lib/centurion` there). The SMU cannot
   be read back. Standalone CO Search requires a local stock reset when it sees a more recent Centurion
-  write record. Apply Curve Optimizer offsets from one app at a time.
+  write record; after the other app applied offsets, CO Search refuses to start until you reset to stock
+  from the app you are using. Apply Curve Optimizer offsets from one app at a time.
 
 ## Themes
 
