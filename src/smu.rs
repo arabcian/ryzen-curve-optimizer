@@ -24,6 +24,7 @@
 //!     zenmaster's ryzen_smu backend do). Also works under lockdown, but is not serialised with the
 //!     driver's own mailbox traffic.
 //!  3. PCI config space of 00:00.0 (0xB8/0xBC), only when the kernel is not locked down.
+//!
 //! Every path takes /run/lock/access_pci.lock (zenmaster/ZenTune use the same file).
 //!
 //! Safety rules: opcode and mailbox come only from `Spec` (no caller-supplied opcode), the SMU
@@ -165,7 +166,7 @@ enum Kind { Kmod, Pci }
 pub struct Bus {
     kind: Kind,
     dev: File,
-    lock: File, // shared /run/lock/access_pci.lock; the smn path also locks its descriptor
+    lock: File, // shared /run/lock/access_pci.lock; the smn path also locks its descriptor 
 }
 
 struct Guard(libc::c_int);
@@ -480,15 +481,17 @@ impl Smu {
     /// Writes nothing to the CO state.
     pub fn open() -> Result<Smu, String> {
         let spec = identify()?;
-        let mut why: Vec<String> = Vec::new();
-        if kmod_usable() {
-            match DriverMb::open(spec) {
-                Ok(mut d) => match d.selftest() {
-                    Ok(()) => return Ok(Smu { spec, link: Link::Driver(d) }),
-                    Err(e) => why.push(e),
-                },
-                Err(e) => why.push(e),
+        if std::path::Path::new(KMOD_DIR).exists() {
+            // Never silently bypass a present kernel driver after its version, codename or
+            // mailbox self-test fails. Its PM-table worker may use the same SMU mailbox;
+            // raw SMN transactions are not serialized by the kernel's amd_smu_mutex.
+            // Users who deliberately need raw access must unload ryzen_smu first.
+            if !kmod_usable() {
+                return Err("ryzen_smu is present but unsupported/unreadable; raw SMN fallback disabled while the driver is loaded".into());
             }
+            let mut d = DriverMb::open(spec)?;
+            d.selftest()?;
+            return Ok(Smu { spec, link: Link::Driver(d) });
         }
         let raw = Bus::open().and_then(|mut bus| {
             let g = bus.guard()?;
@@ -498,7 +501,7 @@ impl Smu {
         });
         match raw {
             Ok(bus) => Ok(Smu { spec, link: Link::Raw(bus) }),
-            Err(e) => { why.push(e); Err(why.join("; ")) }
+            Err(e) => Err(e),
         }
     }
 
@@ -526,7 +529,7 @@ impl Smu {
         loop {
             match self.transact(opcode, arg0)? {
                 RSP_OK => return Ok(()),
-                r if attempt < 3 && (r == 0xFC || !matches!(r, 0xFF | 0xFE | 0xFD)) => {
+                r if attempt < 3 && (r == 0xFC || !matches!(r, 0xFD..=0xFF)) => {
                     attempt += 1;
                     std::thread::sleep(Duration::from_millis(10 << attempt));
                 }
@@ -576,7 +579,7 @@ mod tests {
         assert_eq!(enc_coall(-20) & 0xFFFFF, 0x100000 - 20);
         assert_eq!(enc_coall(0), 0);
         assert_eq!(enc_coall(7), 7);
-        // Same vectors as the ryzenadj-based helper's test.
+        // Same vectors as the old ryzen-co-helper test.
         assert_eq!(enc_coper(1, 0, 3, -20), 0x10300000 | 0xFFEC);
         assert_eq!(enc_coper(0, 0, 0, 5), 5);
         assert_eq!(enc_coper(15, 15, 15, -50), 0xFFF00000 | 0xFFCE);

@@ -14,6 +14,30 @@ pub mod ryzen_mon;
 pub mod smu;
 pub mod stream;
 
+/// One helper at a time per `name`: an flock on /run/ryzen-curve-optimizer/<name>.lock, waited for
+/// up to 30 s.
+pub fn helper_lock(name: &str) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    secure_dir("/run/ryzen-curve-optimizer")?;
+    let path = format!("/run/ryzen-curve-optimizer/{name}.lock");
+    let f = std::fs::OpenOptions::new().create(true).read(true).write(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    for _ in 0..300 {
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 { return Ok(f); }
+        let e = io::Error::last_os_error();
+        if !matches!(e.raw_os_error(), Some(libc::EWOULDBLOCK) | Some(libc::EINTR)) { return Err(format!("{path}: {e}")); }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!("another {name} operation is still running (waited 30 s)"))
+}
+
+/// Hard upper bound on a helper's run time. Once pkexec has started the helper as root the GUI
+/// can no longer kill it on timeout; SIGALRM's default action ends it here instead of letting it
+/// run on unobserved.
+pub fn watchdog(secs: u32) { unsafe { libc::alarm(secs); } }
+
 /// The first processor block of /proc/cpuinfo (vendor, family, model, name are
 /// identical across CPUs), read once per process. The whole file is one
 /// seq_file record per CPU and each record samples that CPU's current
