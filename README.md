@@ -85,6 +85,19 @@ explains this.
   (★ marks the two best cores), and — with *VID + power* ticked — per-core VID
   volts and RAPL watts, plus which SMU limit (PPT/TDC/EDC/THM) is holding the
   clocks when `ryzen_smu` exports its PM table.
+- **CO Search** (Ryzen tab → *CO Search…*): an automatic, crash-guarded search for the most
+  negative stable offset per core or all-core, using `ryzen-cpustress --load co` probes and a
+  final full-curve verification. It starts only from a recorded stock state, journals every trial,
+  survives reboots (crash guards per physical core, resume / recovery), supports manual tuning, and
+  keeps a result archive with evidence and insights. See `docs/CO_SEARCH_*.md`.
+- **CPU stability test** (`ryzen-cpustress`): per-core and all-core work with a known result
+  (SSE / AVX2 / AVX-512 / power / CO loads), run as the user; a saved profile shows the result of
+  its last test in the profile row. Run manual tests and review their history in the *CPU Test* tab.
+  CO Search archives the first wrong result with the core, offset, kernel, seed, idle wait when available, and command.
+- **Safer apply**: a failed per-core batch is rolled back by replaying the previous offsets when
+  every slot supplies one (otherwise back to stock); curve journal and recorded CO state under
+  `/var/lib/ryzen-curve-optimizer` and `/run/ryzen-curve-optimizer`.
+- Profile diff (compare saved profiles), searchable controls, desktop notifications.
 - 21 colour themes (see [Themes](#themes)).
 - An output/log pane showing every applied command and result.
 
@@ -167,9 +180,9 @@ it asks for the password when you switch it on. It is off by default.
 ## Requirements
 
 - Linux with `polkit` (for `pkexec`).
-- Qt 6.4+ (Widgets, Svg) at runtime.
-- To **build**: a Rust toolchain (`cargo`), `cmake` and a C++20 compiler, plus the
-  Qt6 development packages (Debian/Ubuntu: `qt6-base-dev libqt6svg6-dev`).
+- Qt 6.4+ (Widgets, Svg, DBus) at runtime.
+- To **build**: Rust 1.88+ (`cargo`), `cmake` and a C++20 compiler, plus the
+  Qt6 development packages (Debian/Ubuntu: `qt6-base-dev qt6-svg-dev`).
 - SMU access: the [`ryzen_smu`](https://gitlab.com/leogx9r/ryzen_smu) kernel module
   (>= 0.1.7), required under Secure Boot / kernel lockdown; without lockdown a
   writable `/sys/bus/pci/devices/0000:00:00.0/config` also works.
@@ -252,6 +265,20 @@ Python/`ryzenadj` version (the python script at `bin/ryzen-curve-optimizer`, the
 `ryzenadj` and PySide6 are no longer used and can be uninstalled. If an old Python window
 is still open, close it and start the new one. Gruvbox, the old look, is one of the themes.
 
+## Alongside Centurion
+
+This app and [Centurion](https://github.com/arabcian/centurion) can be installed on the same machine;
+every installed file here is named `ryzen-curve-optimizer*` (helper, polkit action, rules, desktop entry,
+`ryzen-cpustress`), so nothing of Centurion's is overwritten.
+
+- **Shared:** the per-user profile folder `~/.config/ryzen-curve-optimizer/profiles/` (same format) and the
+  SMU lock `/run/lock/access_pci.lock`. `uninstall.sh --purge` keeps `profiles/` while Centurion is
+  installed.
+- **Not shared:** the recorded CO state and curve journal (`/run/ryzen-curve-optimizer`,
+  `/var/lib/ryzen-curve-optimizer` here, `/run/centurion` and `/var/lib/centurion` there). The SMU cannot
+  be read back. Standalone CO Search requires a local stock reset when it sees a more recent Centurion
+  write record. Apply Curve Optimizer offsets from one app at a time.
+
 ## Themes
 
 The look is one source of truth (`gui/src/theme.cpp`): a palette of colour tokens
@@ -284,15 +311,18 @@ It also cleans up leftovers from the Python version. `--purge` refuses a home wh
 
 - `src/` — the root helper (Rust): `main.rs` protocol and validation, `smu.rs` native SMU
   mailbox, `ryzen_mon.rs` / `pmtable.rs` read-only monitor, `stream.rs`, `lib.rs` plumbing.
-- `gui/` — the GUI (C++/Qt6): `ryzentab.cpp` main view, `theme.cpp` themes, `privileged.cpp`
-  async `pkexec` runner, `trialbar.cpp` trial apply.
+- `crates/ryzen-cpustress/` — the CPU stability test used by CO Search (runs as the user).
+- `gui/` — the GUI (C++/Qt6): `ryzentab.cpp` main view, `cosearchdialog.cpp` / `costrategy.cpp` /
+  `coevidence.cpp` / `coinsights.cpp` CO Search, `cpustress.cpp` test records, `theme.cpp` themes,
+  `privileged.cpp` async `pkexec` runner, `trialbar.cpp` trial apply.
+- `docs/` — CO Search design notes.
 - `com.ryzencurveoptimizer.policy` — polkit action pinned to the helper.
 - `49-ryzen-curve-optimizer.rules` — polkit rules (security level).
 - `ryzen-curve-optimizer.desktop` — application-menu entry.
 - `install.sh` / `uninstall.sh` — installer (with migration) / uninstaller.
 - `icon.png` / `icon.svg` — application icon.
 
-Tests: `cargo test` (SMU encodings, tables, ranges, mailbox behaviour against a fake SMU).
+Tests: `cargo test --release --workspace` (SMU encodings, tables, ranges, mailbox behaviour against a fake SMU, stress-test kernels) and, for the GUI logic, `cmake -S gui -B gui/build -DRCO_BUILD_TESTS=ON && cmake --build gui/build && ctest --test-dir gui/build` (CO Search strategy / evidence / archive, CPU stress records).
 
 ## License / attribution
 

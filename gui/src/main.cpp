@@ -4,6 +4,7 @@
 //   ryzen-curve-optimizer            open the window
 //   ryzen-curve-optimizer --detect   print the detected CCD topology (JSON), no GUI
 //   ryzen-curve-optimizer --version
+#include "cpustressbox.h"
 #include "privileged.h"
 #include "ryzentab.h"
 #include "theme.h"
@@ -12,6 +13,9 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QEvent>
+#include <QDir>
+#include <QFileInfo>
+#include <QLockFile>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QJsonArray>
@@ -19,6 +23,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
+#include <QTabWidget>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QWidget>
@@ -107,7 +112,17 @@ public:
         headRow->addWidget(themeBox, 0, Qt::AlignVCenter);
         root->addLayout(headRow);
 
-        root->addWidget(new RyzenTab, 1);
+        auto *tabs = new QTabWidget;
+        auto *ryzen = new RyzenTab;
+        auto *stress = new CpuStressBox([ryzen] { return !ryzen->operationActive(); });
+        const int curveIndex = tabs->addTab(ryzen, tr("Ryzen Curve"));
+        tabs->addTab(stress, tr("CPU Test"));
+        connect(stress, &CpuStressBox::runningChanged, this, [tabs, ryzen, curveIndex, themeBox](bool running) {
+            tabs->setTabEnabled(curveIndex, !running);
+            themeBox->setEnabled(!running);
+            if (!running) ryzen->updateVerified();
+        });
+        root->addWidget(tabs, 1);
         resize(980, 720);
     }
 };
@@ -129,6 +144,14 @@ int main(int argc, char **argv) {
     app.setApplicationName("Ryzen Curve Optimizer");
     app.setApplicationVersion(RCO_VERSION);
     app.setDesktopFileName("ryzen-curve-optimizer");
+    const QString statePath = cpustress::stateFile();
+    QDir().mkpath(QFileInfo(statePath).absolutePath());
+    QLockFile lock(statePath + QStringLiteral(".lock"));
+    lock.setStaleLockTime(0);
+    if (!lock.tryLock(0)) {
+        std::fputs("ryzen-curve-optimizer: another instance is running or the state directory is unavailable.\n", stderr);
+        return 1;
+    }
     theme::load();  // palette tokens first: every widget reads them while it is built
     app.setWindowIcon(QIcon::fromTheme(QStringLiteral("ryzen-curve-optimizer"), QIcon(QStringLiteral(":/icon.svg"))));
     app.installEventFilter(new NoComboWheel(&app));  // deliberate, see NoComboWheel — keep it
@@ -141,6 +164,7 @@ int main(int argc, char **argv) {
     const int rc = app.exec();
     if (!theme::restartRequested()) return rc;
     // Theme change: start again in place.
+    lock.unlock();
     std::vector<char *> av(argv, argv + argc);
     av.push_back(nullptr);
     ::execv("/proc/self/exe", av.data());

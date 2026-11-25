@@ -3,21 +3,22 @@
 //! JSON protocol, one request on stdin, one JSON line on stdout:
 //!   {"op": "set_coall", "params": {"value": -20}}
 //!   {"op": "set_coper_batch", "params": {"entries": [{ccd,ccx,core,coper[,prev]}, ...], "reset": true}}
+//!       both take an optional "profile": NAME (≤ 64 bytes) — only the curve journal uses it
 //!   {"op": "reset"}
 //!   {"op": "probe"}
 //!       read-only: detected family, SMU transport, kernel lockdown, allowed offset range (no CO write).
-//!       A CPU without a verified interface answers {"ok": false, "unsupported_cpu": true, ...}.
-//!   {"op": "monitor_stream", "params": {"interval_ms": n, "limits": bool}}
-//!       read-only: one line of per-CPU VID volts / core watts + package watts (ryzen_mon),
-//!       plus the PM table head when "limits" is set (pmtable), every interval (500..10000 ms)
-//!       until stdin reaches EOF. The request line must end with '\n' so stdin can stay open.
+//!   {"op": "monitor_stream", "params": {"interval_ms": n, "limits": bool}}   ("limits": + PM table head, see pmtable)
+//!       read-only: one line of per-CPU VID volts / core watts + package watts
+//!       (ryzen_mon) every interval (500..10000 ms) until stdin reaches EOF.
+//!       The request line must end with '\n' so stdin can stay open.
 //!
-//! The SMU is driven natively (smu): family table, mailbox addresses and opcodes are fixed
-//! constants cross-checked against RyzenAdj, the answer is polled for at most one second, and no
-//! opcode ever comes from the request. Out-of-range values are rejected, never clamped.
+//! The SMU is driven natively (smu): family table, mailbox addresses and
+//! opcodes are fixed constants cross-checked against RyzenAdj, the answer is polled for at most
+//! one second, and no opcode ever comes from the request. Out-of-range values are rejected,
+//! never clamped.
 
 use ryzen_curve_optimizer_helper::smu::Smu;
-use ryzen_curve_optimizer_helper::{finish, init, pmtable, ryzen_mon, smu, stream};
+use ryzen_curve_optimizer_helper::{finish, helper_lock, init, ocjournal, pmtable, read_root_file, ryzen_mon, secure_dir, smu, stream, watchdog, write_root_file};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -147,10 +148,33 @@ fn op_set_coper_batch(p: &Map<String, Value>) -> Result<Value, Invalid> {
         results.push(json!({"ok": false, "skipped": true, "message": "not written (earlier entry failed)", "ccd": ccd, "ccx": ccx, "core": core, "coper": coper}));
     }
     if reset_first {
-        let r = smu.set_coall(0);
-        return Ok(json!({"ok": false, "results": results, "state": if r.is_ok() { "stock" } else { "unknown" },
-                         "rollback": [{"ok": r.is_ok(), "message": r.err().map_or("OK".to_owned(), |e| e.message().to_owned()), "coall": 0}],
-                         "note": "profile reset all cores to stock first; undo returns to stock, not to the offsets before this call"}));
+        // Stock is the only safe fallback when the caller lacks a complete prior
+        // snapshot: SMU has no read-back operation. When every entry supplies a
+        // previous value, first reset to stock then replay those values. This
+        // restores the named slots; unnamed prior slots cannot be reconstructed.
+        let reset = smu.set_coall(0);
+        let mut rolled = vec![json!({"ok": reset.is_ok(), "message": reset.as_ref().err().map_or("OK", |e| e.message()), "coall": 0})];
+        if reset.is_err() {
+            return Ok(json!({"ok": false, "results": results, "rollback": rolled, "state": "unknown"}));
+        }
+        if prevs.iter().all(Option::is_some) {
+            std::thread::sleep(Duration::from_millis(150));
+            let mut clean = true;
+            for (i, &(ccd, ccx, core, _)) in validated.iter().enumerate() {
+                let back = prevs[i].expect("checked above");
+                let r = smu.set_coper(ccd, ccx, core, back);
+                clean &= r.is_ok();
+                rolled.push(json!({"ok": r.is_ok(), "message": r.as_ref().err().map_or("OK", |e| e.message()),
+                                  "ccd": ccd, "ccx": ccx, "core": core, "coper": back}));
+                if !clean { break; }
+                std::thread::sleep(Duration::from_millis(3));
+            }
+            return Ok(json!({"ok": false, "results": results, "rollback": rolled,
+                             "state": if clean { "partial_original" } else { "unknown" },
+                             "note": "restored caller-provided previous offsets for the listed slots; other prior offsets cannot be recovered"}));
+        }
+        return Ok(json!({"ok": false, "results": results, "state": "stock", "rollback": rolled,
+                         "note": "caller did not supply previous values for every slot; reverted to stock"}));
     }
     let mut rolled: Vec<Value> = Vec::new();
     let mut explicit = true;
@@ -212,18 +236,66 @@ fn run() -> Value {
             _ => return json!({"ok": false, "error": format!("unknown op: {}",
                      op.map(|v| v.to_string()).unwrap_or_else(|| "None".into()))}),
         };
+    watchdog(120);
+    let _lock = match helper_lock("ryzen-curve-optimizer-helper") { Ok(l) => l, Err(e) => return json!({"ok": false, "error": e}) };
     let empty = Map::new();
     let params = match obj.get("params") {
         None | Some(Value::Null) => &empty,
         Some(Value::Object(m)) => m,
         Some(_) => return json!({"ok": false, "error": "params must be a JSON object"}),
     };
-    handler(params).unwrap_or_else(|Invalid(m)| json!({"ok": false, "error": format!("invalid request: {m}")}))
+    let out = handler(params).unwrap_or_else(|Invalid(m)| json!({"ok": false, "error": format!("invalid request: {m}")}));
+    if out["ok"] == true {
+        let op = op.and_then(Value::as_str).unwrap_or("");
+        record_state(op, params);
+        // Curve journal: which Curve Optimizer state is in effect from now on. A saved profile applied
+        // by name is journalled by that name.
+        let profile = params.get("profile").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);
+        match (op, profile) {
+            ("reset", _) => ocjournal::record("cpu_co", "reset"),
+            ("set_coall", p) => match (params.get("value").and_then(Value::as_i64), p) {
+                (Some(0), _) => ocjournal::record("cpu_co", "reset"),
+                (Some(_), Some(n)) => ocjournal::record("cpu_co", &format!("profile:{n}")),
+                (Some(v), None) => ocjournal::record("cpu_co", &format!("all-core {v}")),
+                (None, _) => {}
+            },
+            ("set_coper_batch", Some(n)) => ocjournal::record("cpu_co", &format!("profile:{n}")),
+            ("set_coper_batch", None) => ocjournal::record("cpu_co", "per-core"),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// What the SMU now holds (tmpfs: a reboot resets both). The SMU cannot be read back, so CO Search
+/// uses this record to prove the starting state is stock. All-core offsets replace the state;
+/// per-core batches update their cores.
+const CO_STATE: &str = "/run/ryzen-curve-optimizer/co-state.json";
+
+fn record_state(op: &str, params: &Map<String, Value>) {
+    let mut st: Value = read_root_file(CO_STATE, 64 * 1024).and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &Value| v["state"].is_object() || v["state"].is_string()).unwrap_or_else(|| json!({"state": "reset"}));
+    match op {
+        "reset" => st = json!({"state": "reset"}),
+        "set_coall" => st = json!({"state": {"all": params.get("value").cloned().unwrap_or(Value::Null)}}),
+        "set_coper_batch" => {
+            if !st["state"].is_object() { st["state"] = json!({}); }
+            for e in params.get("entries").and_then(Value::as_array).into_iter().flatten() {
+                let k = format!("{}.{}.{}", e["ccd"], e["ccx"], e["core"]);
+                st["state"][k] = e["coper"].clone();
+            }
+        }
+        _ => return,
+    }
+    if secure_dir("/run/ryzen-curve-optimizer").is_ok() { let _ = write_root_file(CO_STATE, st.to_string().as_bytes()); }
 }
 
 fn main() {
     init();
-    std::process::exit(finish(run()));
+    let mut v = run();
+    // Version handshake: the GUI warns when its helpers come from another install.
+    if let Some(o) = v.as_object_mut() { o.insert("helper_version".into(), json!(env!("CARGO_PKG_VERSION"))); }
+    std::process::exit(finish(v));
 }
 
 #[cfg(test)]
@@ -241,5 +313,32 @@ mod tests {
         let p = json!({"entries": [{"ccd":0,"ccx":0,"core":1,"coper":-10},
                                     {"ccd":0,"ccx":0,"core":1,"coper":-5}]});
         assert!(op_set_coper_batch(p.as_object().unwrap()).is_err());
+    }
+
+    // ── property tests ──────────────────────────────────────────────────────
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+        /// Only a JSON integer inside [lo, hi] is accepted - never a float, string, bool or null,
+        /// and never a value outside the bounds, for any bounds.
+        #[test]
+        fn require_int_is_strict(n in any::<i64>(), lo in -60i64..0, hi in 0i64..30, f in any::<f64>(), s in ".{0,8}") {
+            match require_int(Some(&json!(n)), "v", lo, hi) {
+                Ok(v) => { prop_assert_eq!(v, n); prop_assert!((lo..=hi).contains(&n)); }
+                Err(_) => prop_assert!(!(lo..=hi).contains(&n)),
+            }
+            if f.is_finite() { prop_assert!(require_int(Some(&json!(f)), "v", lo, hi).is_err()); }
+            prop_assert!(require_int(Some(&json!(s)), "v", lo, hi).is_err());
+            prop_assert!(require_int(Some(&Value::Null), "v", lo, hi).is_err());
+            prop_assert!(require_int(None, "v", lo, hi).is_err());
+        }
+
+        /// u64 beyond i64::MAX is refused, not wrapped into range.
+        #[test]
+        fn require_int_refuses_huge_u64(n in (i64::MAX as u64 + 1)..=u64::MAX) {
+            prop_assert!(require_int(Some(&json!(n)), "v", -50, 20).is_err());
+        }
     }
 }

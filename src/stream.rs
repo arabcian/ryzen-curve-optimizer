@@ -1,5 +1,5 @@
 //! Line-based request + sample stream plumbing for the monitor helpers
-//! (the Ryzen helper's monitor_stream). One pkexec per monitoring session
+//! (intel-uv-helper, ryzen-curve-optimizer-helper). One pkexec per monitoring session
 //! instead of one per sample: the request is the first stdin line, samples go
 //! out one JSON line each, and stdin EOF (tab hidden, GUI gone) ends it.
 

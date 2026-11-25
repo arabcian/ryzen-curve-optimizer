@@ -121,7 +121,7 @@ if [ "$BUILD" -eq 1 ]; then
     CARGO="$(as_user bash -c 'command -v cargo || { [ -x "$HOME/.cargo/bin/cargo" ] && echo "$HOME/.cargo/bin/cargo"; }' || true)"
     [ -n "$CARGO" ] || die "cargo not found (needed to build the root helper): install Rust, or use --no-build with a prebuilt tree"
     info "Building the root helper (Rust)"
-    as_user "$CARGO" build --release --locked
+    as_user "$CARGO" build --release --locked --workspace
     info "Building the GUI (Qt6)"
     as_user cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release \
         -DRCO_HELPER_DIR="$PREFIX/lib/$APP_ID" -DRCO_HARDEN="$([ "$HARDEN" -eq 1 ] && echo ON || echo OFF)"
@@ -129,6 +129,8 @@ if [ "$BUILD" -eq 1 ]; then
 fi
 [ -x "$BUILT_HELPER" ] || die "$BUILT_HELPER not built (run without --no-build)"
 [ -x "$BUILT_GUI" ]    || die "$BUILT_GUI not built (run without --no-build)"
+BUILT_CPUSTRESS="target/release/ryzen-cpustress"
+[ -x "$BUILT_CPUSTRESS" ] || die "$BUILT_CPUSTRESS not built (run without --no-build)"
 # The GUI pins the helper path at compile time; it must be the path polkit pins.
 if ! as_user "$BUILT_GUI" --version 2>/dev/null | grep -qF "(helper: $PREFIX/lib/$APP_ID)"; then
     die "$BUILT_GUI was built for a different PREFIX; rebuild without --no-build (or with PREFIX matching the build)"
@@ -180,6 +182,8 @@ own=(-o root -g root); [ -z "$DESTDIR" ] || own=()
 info "Installing application: $PREFIX/bin/$APP_ID"
 install -d "${own[@]}" -m 0755 "$BIN_DIR"
 install "${own[@]}" -m 0755 "$BUILT_GUI" "$BIN_DIR/$APP_ID"
+# CPU stability test used by CO Search and the profile verification badge; runs as the user.
+install "${own[@]}" -m 0755 "$BUILT_CPUSTRESS" "$BIN_DIR/ryzen-cpustress"
 
 # Mode 0755 root:root is mandatory: pkexec refuses to execute a program
 # that is group- or world-writable, or not owned by root.
