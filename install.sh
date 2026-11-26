@@ -39,6 +39,7 @@ set -euo pipefail
 
 APP_ID="ryzen-curve-optimizer"
 HELPER_NAME="ryzen-curve-optimizer-helper"
+HEALTH_NAME="health-reader"   # read-only kernel-log reader CO Search calls through pkexec
 POLICY_NAME="com.ryzencurveoptimizer.policy"
 ACTION_ID="com.ryzencurveoptimizer.set-curve"
 RULES_NAME="49-ryzen-curve-optimizer.rules"
@@ -74,6 +75,7 @@ RULES_DIR="$DESTDIR$POLKIT_RULESDIR"
 # Path the polkit annotation and the GUI must point at, as seen by the RUNNING
 # system (never DESTDIR-prefixed).
 HELPER_RUNTIME_PATH="$PREFIX/lib/$APP_ID/$HELPER_NAME"
+HEALTH_RUNTIME_PATH="$PREFIX/lib/$APP_ID/$HEALTH_NAME"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -114,6 +116,7 @@ as_user() { if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then sudo -u "$S
 
 # ── Build ─────────────────────────────────────────────────────────────
 BUILT_HELPER="target/release/$HELPER_NAME"
+BUILT_HEALTH="target/release/$HEALTH_NAME"
 BUILT_GUI="gui/build/$APP_ID"
 if [ "$BUILD" -eq 1 ]; then
     for t in cmake g++; do command -v "$t" >/dev/null 2>&1 || die "$t not found (needed to build the GUI)"; done
@@ -128,6 +131,7 @@ if [ "$BUILD" -eq 1 ]; then
     as_user cmake --build gui/build -j"$(nproc)"
 fi
 [ -x "$BUILT_HELPER" ] || die "$BUILT_HELPER not built (run without --no-build)"
+[ -x "$BUILT_HEALTH" ] || die "$BUILT_HEALTH not built (run without --no-build)"
 [ -x "$BUILT_GUI" ]    || die "$BUILT_GUI not built (run without --no-build)"
 BUILT_CPUSTRESS="target/release/ryzen-cpustress"
 [ -x "$BUILT_CPUSTRESS" ] || die "$BUILT_CPUSTRESS not built (run without --no-build)"
@@ -190,6 +194,10 @@ install "${own[@]}" -m 0755 "$BUILT_CPUSTRESS" "$BIN_DIR/ryzen-cpustress"
 info "Installing root helper: $HELPER_RUNTIME_PATH"
 install -d "${own[@]}" -m 0755 "$LIB_DIR"
 install "${own[@]}" -m 0755 "$BUILT_HELPER" "$LIB_DIR/$HELPER_NAME"
+# CO Search reads the kernel log through this one (read-only, its own silent polkit action); without
+# it a search cannot start, because an unreadable log is never counted as a clean trial.
+info "Installing kernel-log reader: $HEALTH_RUNTIME_PATH"
+install "${own[@]}" -m 0755 "$BUILT_HEALTH" "$LIB_DIR/$HEALTH_NAME"
 
 info "Installing icons and desktop entry"
 install -d "${own[@]}" -m 0755 "$SHARE_DIR" "$APPS_DIR" "$ICON_DIR/128x128/apps" "$ICON_DIR/scalable/apps"
@@ -209,13 +217,16 @@ install -d "${own[@]}" -m 0755 "$POLICY_DIR" "$RULES_DIR"
 install "${own[@]}" -m 0644 "$POLICY_NAME" "$POLICY_DIR/$POLICY_NAME"
 # The annotation ships with the /usr default; rewrite it to where the helper actually landed.
 # If this path and the pkexec argv ever disagree, the action silently stops being enforced.
-sed -i \
-    "s#<annotate key=\"org.freedesktop.policykit.exec.path\">[^<]*</annotate>#<annotate key=\"org.freedesktop.policykit.exec.path\">$HELPER_RUNTIME_PATH</annotate>#" \
-    "$POLICY_DIR/$POLICY_NAME"
-grep -qF ">$HELPER_RUNTIME_PATH<" "$POLICY_DIR/$POLICY_NAME" || die "failed to set exec.path in the installed policy file"
+# One action per program: each is matched on its own file name.
+for pair in "$HELPER_NAME:$HELPER_RUNTIME_PATH" "$HEALTH_NAME:$HEALTH_RUNTIME_PATH"; do
+    sed -i \
+        "s#<annotate key=\"org.freedesktop.policykit.exec.path\">[^<]*/${pair%%:*}</annotate>#<annotate key=\"org.freedesktop.policykit.exec.path\">${pair#*:}</annotate>#" \
+        "$POLICY_DIR/$POLICY_NAME"
+    grep -qF ">${pair#*:}<" "$POLICY_DIR/$POLICY_NAME" || die "failed to set exec.path of ${pair%%:*} in the installed policy file"
+done
 
 info "Installing polkit rules (security level $SECLEVEL): $POLKIT_RULESDIR/$RULES_NAME"
-sed -e "s|@HELPER@|$HELPER_RUNTIME_PATH|g" -e "s|@SECLEVEL@|$SECLEVEL|g" "$RULES_NAME" > "$RULES_DIR/$RULES_NAME"
+sed -e "s|@HELPER@|$HELPER_RUNTIME_PATH|g" -e "s|@HEALTH@|$HEALTH_RUNTIME_PATH|g" -e "s|@SECLEVEL@|$SECLEVEL|g" "$RULES_NAME" > "$RULES_DIR/$RULES_NAME"
 chmod 0644 "$RULES_DIR/$RULES_NAME"
 [ -n "$DESTDIR" ] || chown root:root "$RULES_DIR/$RULES_NAME"
 
@@ -306,7 +317,7 @@ if [ -z "$DESTDIR" ]; then
     kmod() { [ -d "/sys/module/$1" ] || modinfo "$1" >/dev/null 2>&1; }
     dep "polkit (pkexec)"              "command -v pkexec"                         "required — runs the root helper"
     dep "Qt6 Widgets/Svg"              "lib libQt6Widgets.so.6 && lib libQt6Svg.so.6" "required — GUI"
-    dep "ryzen_smu >= 0.1.7"           "kmod ryzen_smu"                            "needed under Secure Boot / kernel lockdown"
+    dep "ryzen_smu >= 0.1.9"           "kmod ryzen_smu"                            "needed under Secure Boot / kernel lockdown"
     dep "or writable PCI config space" "[ -w /sys/bus/pci/devices/0000:00:00.0/config ]" "works only without lockdown"
     dep "msr module"                   "kmod msr"                                  "optional — 'VID + power' live monitor"
     probe="$(echo '{"op":"probe"}' | "$LIB_DIR/$HELPER_NAME" 2>/dev/null || true)"

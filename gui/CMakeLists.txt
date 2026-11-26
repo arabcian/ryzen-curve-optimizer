@@ -84,7 +84,8 @@ if(RCO_BUILD_TESTS)
             "coinsights|src/coinsights.cpp+src/costrategy.cpp"
             "coevidence|src/coevidence.cpp+src/costrategy.cpp"
             "coarchive|"
-            "cohistory|")
+            "cohistory|"
+            "slotmap|")
         string(REPLACE "|" ";" parts "${spec}")
         list(GET parts 0 test)
         list(GET parts 1 extra)

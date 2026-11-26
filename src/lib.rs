@@ -9,6 +9,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::Path;
 
+pub mod health;
 pub mod ocjournal;
 pub mod pmtable;
 pub mod ryzen_mon;

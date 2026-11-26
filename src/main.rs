@@ -245,6 +245,11 @@ fn run() -> Value {
         Some(_) => return json!({"ok": false, "error": "params must be a JSON object"}),
     };
     let out = handler(params).unwrap_or_else(|Invalid(m)| json!({"ok": false, "error": format!("invalid request: {m}")}));
+    if out["ok"] != true {
+        // A write can reach the SMU and still report a failure (lost reply, failed undo): the old
+        // record must not outlive that, or CO Search would take "reset" for proof of stock.
+        if let Some(st) = failure_state(&out) { write_state(&st); }
+    }
     if out["ok"] == true {
         let op = op.and_then(Value::as_str).unwrap_or("");
         record_state(op, params);
@@ -272,6 +277,23 @@ fn run() -> Value {
 /// per-core batches update their cores.
 const CO_STATE: &str = "/run/ryzen-curve-optimizer/co-state.json";
 
+/// The record to keep after a failed operation, None when the hardware certainly holds what the
+/// record already says. "original": every undo went through. "stock": undone to 0. Anything else
+/// (an undo failed, a partial replay, a command that was sent and not answered) is unknown.
+fn failure_state(out: &Value) -> Option<Value> {
+    match out["state"].as_str() {
+        Some("original") => None,
+        Some("stock") => Some(json!({"state": "reset"})),
+        Some(_) => Some(json!({"state": "unknown"})),
+        None if out.get("applied").is_some() => Some(json!({"state": "unknown"})),
+        None => None,  // refused before any command was sent
+    }
+}
+
+fn write_state(st: &Value) {
+    if secure_dir("/run/ryzen-curve-optimizer").is_ok() { let _ = write_root_file(CO_STATE, st.to_string().as_bytes()); }
+}
+
 fn record_state(op: &str, params: &Map<String, Value>) {
     let mut st: Value = read_root_file(CO_STATE, 64 * 1024).and_then(|s| serde_json::from_str(&s).ok())
         .filter(|v: &Value| v["state"].is_object() || v["state"].is_string()).unwrap_or_else(|| json!({"state": "reset"}));
@@ -279,6 +301,8 @@ fn record_state(op: &str, params: &Map<String, Value>) {
         "reset" => st = json!({"state": "reset"}),
         "set_coall" => st = json!({"state": {"all": params.get("value").cloned().unwrap_or(Value::Null)}}),
         "set_coper_batch" => {
+            // Without the stock reset in front, what was there before is still there, unknown.
+            if st["state"] == "unknown" && params.get("reset").and_then(Value::as_bool) == Some(false) { return; }
             if !st["state"].is_object() { st["state"] = json!({}); }
             for e in params.get("entries").and_then(Value::as_array).into_iter().flatten() {
                 let k = format!("{}.{}.{}", e["ccd"], e["ccx"], e["core"]);
@@ -287,7 +311,7 @@ fn record_state(op: &str, params: &Map<String, Value>) {
         }
         _ => return,
     }
-    if secure_dir("/run/ryzen-curve-optimizer").is_ok() { let _ = write_root_file(CO_STATE, st.to_string().as_bytes()); }
+    write_state(&st);
 }
 
 fn main() {
@@ -340,5 +364,23 @@ mod tests {
         fn require_int_refuses_huge_u64(n in (i64::MAX as u64 + 1)..=u64::MAX) {
             prop_assert!(require_int(Some(&json!(n)), "v", -50, 20).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn failed_writes_never_leave_a_stale_stock_record() {
+        assert_eq!(failure_state(&json!({"ok": false, "state": "original"})), None);
+        assert_eq!(failure_state(&json!({"ok": false, "state": "stock"})), Some(json!({"state": "reset"})));
+        for st in ["unknown", "partial_original"] {
+            assert_eq!(failure_state(&json!({"ok": false, "state": st})), Some(json!({"state": "unknown"})));
+        }
+        // set_coall failing on the SMU: the command may have landed and the reply got lost.
+        assert_eq!(failure_state(&json!({"ok": false, "error": "timeout", "applied": {"coall": -10}})), Some(json!({"state": "unknown"})));
+        // Refused before anything was sent (no SMU, bad range): the record still holds.
+        assert_eq!(failure_state(&json!({"ok": false, "error": "no SMU"})), None);
     }
 }

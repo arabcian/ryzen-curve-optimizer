@@ -47,9 +47,15 @@ function adminAtConsole(subject) {
 }
 var HELPER = "@HELPER@";
 var SECURITY_LEVEL = @SECLEVEL@;
+var HEALTH = "@HEALTH@";
 var ACTION_IDS = ["com.ryzencurveoptimizer.set-curve"];
+// The read-only kernel-log reader: silent for a local active session at every level, password otherwise.
+var READ_ONLY_IDS = ["com.ryzencurveoptimizer.read-health"];
 
 polkit.addRule(function (action, subject) {
+    var readOnly = READ_ONLY_IDS.indexOf(action.id) >= 0 ||
+        (action.id === "org.freedesktop.policykit.exec" && action.lookup("program") === HEALTH);
+    if (readOnly) { return subject.local && subject.active ? polkit.Result.YES : polkit.Result.AUTH_ADMIN; }
     // Any other com.ryzencurveoptimizer.* id is unknown to this file: password, never silent.
     if (action.id.indexOf("com.ryzencurveoptimizer.") === 0 && ACTION_IDS.indexOf(action.id) < 0) {
         return polkit.Result.AUTH_ADMIN;

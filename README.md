@@ -184,7 +184,7 @@ it asks for the password when you switch it on. It is off by default.
 - To **build**: Rust 1.88+ (`cargo`), `cmake` and a C++20 compiler, plus the
   Qt6 development packages (Debian/Ubuntu: `qt6-base-dev qt6-svg-dev`).
 - SMU access: the [`ryzen_smu`](https://gitlab.com/leogx9r/ryzen_smu) kernel module
-  (>= 0.1.7), required under Secure Boot / kernel lockdown; without lockdown a
+  (>= 0.1.9), required under Secure Boot / kernel lockdown; without lockdown a
   writable `/sys/bus/pci/devices/0000:00:00.0/config` also works.
 - Optional: the `msr` module for the *VID + power* monitor.
 - A supported AMD Ryzen CPU (see above). It does not work on Intel CPUs.

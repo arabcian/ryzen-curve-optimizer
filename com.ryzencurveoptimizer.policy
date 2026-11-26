@@ -44,4 +44,25 @@
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 
+  <!--
+    Read-only kernel-log reader (CO Search: machine checks, lockups, oopses during a trial). It
+    writes nothing, so a local active session may run it without a password; any other session
+    authenticates. exec.path is rewritten by install.sh like the one above.
+  -->
+  <action id="com.ryzencurveoptimizer.read-health">
+    <description>Read the kernel log for Ryzen Curve Optimizer stability checks</description>
+    <description xml:lang="tr">Ryzen Curve Optimizer kararlılık kontrolleri için çekirdek günlüğünü oku</description>
+    <message>Authentication is required to read the kernel log</message>
+    <message xml:lang="tr">Çekirdek günlüğünü okumak için kimlik doğrulama gerekiyor</message>
+
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/ryzen-curve-optimizer/health-reader</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
 </policyconfig>
